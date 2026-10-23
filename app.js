@@ -5,7 +5,8 @@
      sem internet, tudo é lançado normalmente e enviado depois.
    ========================================================================= */
 'use strict';
-const VERSAO_APP = '1.1.0 · edição tablet';
+const VERSAO_APP = '1.2.0 · edição tablet';
+const FORMA_PEND = 'A pagar';   // forma de pagamento que deixa o item pendente até a baixa
 
 /* =====================================================================
    NÚCLEO — regras de negócio (iguais às do servidor)
@@ -21,6 +22,7 @@ const CATS = {
 const CAT_ORDER = ['enviado','mo','material','dia','salario','apagar'];
 const CAT_TOTAL = ['mo','material','dia','salario','apagar'];
 const CAT_PROPRIETARIO = ['enviado','mo','material','salario','apagar'];
+const ehPendente = l => !l.cancelado && l.status==='Pendente';
 const PERFIL_NOME = {admin:'Administrador', engenheiro:'Engenheiro', proprietario:'Proprietário'};
 const FMT_BRL = '"R$" #,##0.00;[Red]-"R$" #,##0.00';
 const UN_DESC = {
@@ -53,14 +55,21 @@ const uid = () => (crypto.randomUUID ? crypto.randomUUID() : ([1e7]+-1e3+-4e3+-8
 const clone = o => JSON.parse(JSON.stringify(o));
 
 function totais(list){
-  const t = {enviado:0,mo:0,material:0,dia:0,salario:0,apagar:0,adiant:0,reembRec:0};
+  const t = {enviado:0,mo:0,material:0,dia:0,salario:0,apagar:0,adiant:0,reembRec:0,pend:0,diaPend:0,qPend:0};
+  let prox = null;
   for (const l of list){
     if (l.cancelado) continue;
     t[l.categoria] = (t[l.categoria]||0) + (+l.total||0);
+    if (l.status==='Pendente'){
+      t.pend += +l.total||0; t.qPend++;
+      if (l.categoria==='dia') t.diaPend += +l.total||0;
+      if (l.venc && (!prox || l.venc < prox.venc)) prox = l;
+    }
     if (l.categoria==='enviado'){ if (l.tipo==='Reembolso recebido') t.reembRec += +l.total||0; else t.adiant += +l.total||0; }
   }
-  for (const k in t) t[k] = round2(t[k]);
-  t.reembolso = round2(t.dia - t.enviado);
+  for (const k in t) if (k!=='qPend') t[k] = round2(t[k]);
+  t.proxVenc = prox ? prox.venc : '';
+  t.reembolso = round2(t.dia - t.diaPend - t.enviado);   // custos dia a dia ainda "A pagar" não entram no reembolso
   t.total = round2(CAT_TOTAL.reduce((a,k)=>a+t[k],0));
   return t;
 }
@@ -144,7 +153,7 @@ function abaSimples(nome, titulo, info, cols, itens){
 function abaCustos(nome, titulo, info, itens, modo, periodos){
   const cols = [col('Data','data',11),col('Nº NF / Recibo','doc',14),col('Fornecedor','forn',26),col('Descrição do item / serviço','desc',32),
     col('Subcategoria','sub',24),col('Etapa da obra','etapa',16),col('Qtd.','qtd',7),col('Unid.','un',7),col('Valor unitário (R$)','vu',15),
-    col('Valor total (R$)','total',16),col('Forma de pagamento','forma',14),col('Comprovante','comp',12),col('Mês ref.','mes',9),col('Lançado por','por',18),col('Observações','obs',30)];
+    col('Valor total (R$)','total',16),col('Forma de pagamento','forma',14),col('Comprovante','comp',12),col('Mês ref.','mes',9),col('Lançado por','por',18),col('Observações','obs',30),col('Situação','status',10),col('Vencimento','venc',11)];
   const TC = 9, last = cols.length-1, J = colL(TC);
   const M = [[cT(titulo,XS.title)], [cT(info,XS.info)], [], []];
   const merges = [{s:{r:0,c:0},e:{r:0,c:last}},{s:{r:1,c:0},e:{r:1,c:last}}];
@@ -186,7 +195,7 @@ function construirWorkbook(obra, L, agrupamento, periodos){
   const info = `Obra: ${obra.nome}${obra.cidade?' — '+obra.cidade:''}  |  Gerado em ${gerado} por ${S.usuario.nome}`;
   const de = k => L.filter(l=>l.categoria===k).sort(porData);
   const t = totais(L);
-  const comuns = [col('Forma de pagamento','forma',14),col('Qtd.','qtd',7),col('Unid.','un',7),col('Valor unitário (R$)','vu',15),col('Valor total (R$)','total',16),col('Mês ref.','mes',9),col('Comprovante','comp',12),col('Lançado por','por',18),col('Observações','obs',30)];
+  const comuns = [col('Forma de pagamento','forma',14),col('Qtd.','qtd',7),col('Unid.','un',7),col('Valor unitário (R$)','vu',15),col('Valor total (R$)','total',16),col('Mês ref.','mes',9),col('Comprovante','comp',12),col('Lançado por','por',18),col('Observações','obs',30),col('Situação','status',10),col('Vencimento','venc',11)];
   const env = abaSimples('Valor enviado','VALOR ENVIADO PELO PROPRIETÁRIO',info,[col('Data','data',11),col('Nº documento','doc',14),col('Tipo','tipo',24),col('Origem do recurso','forn',26),col('Descrição','desc',34),...comuns], de('enviado'));
   const mo  = abaSimples('Mão de Obra','MÃO DE OBRA',info,[col('Data','data',11),col('Nº documento','doc',14),col('Beneficiário','forn',24),col('Descrição','desc',34),col('Etapa da obra','etapa',16),...comuns], de('mo'));
   const mat = abaSimples('Material','MATERIAL',info,[col('Data','data',11),col('Nº NF / Recibo','doc',14),col('Fornecedor','forn',24),col('Material','desc',34),col('Etapa da obra','etapa',16),...comuns], de('material'));
@@ -200,14 +209,15 @@ function construirWorkbook(obra, L, agrupamento, periodos){
   const RM = [
     [cT('DEMONSTRATIVO DE REEMBOLSO',XS.title)], [cT(info,XS.info)], [],
     [cT('Item',XS.head), cT('Valor (R$)',XS.head)],
-    [cT('Custos dia a dia',XS.lbl), cF(dia.ref, t.dia)],
+    [cT('Custos dia a dia já pagos',XS.lbl), cF(`${dia.ref}-SUMIF('Custos dia a dia'!P:P,"Pendente",'Custos dia a dia'!J:J)`, t.dia - t.diaPend)],
     [cT('(−) Total do valor enviado',XS.lbl), cF(env.ref, t.enviado)],
     [cT('      dos quais: reembolsos recebidos',XS.txt), rng ? cF(`SUMIF(${rng[0]},"Reembolso recebido",${rng[1]})`, t.reembRec) : cM(0)],
     [cT('      dos quais: adiantamentos para custos',XS.txt), cF('B6-B7', t.adiant)],
     [cT('SALDO (Custos dia a dia − Valor enviado)',XS.grandLbl), cF('B5-B6', t.reembolso, XS.grand)],
     [cT('Situação',XS.lbl), cFs('IF(B9>0.004,"A reembolsar ao engenheiro",IF(B9<-0.004,"Saldo em caixa com o engenheiro","Quitado — sem saldo"))', interpretaReemb(t.reembolso), XS.lbl)],
     [cT('Valor absoluto do saldo',XS.lbl), cF('ABS(B9)', Math.abs(t.reembolso))],
-    [], [cT('Saldo positivo: o proprietário deve reembolsar o engenheiro. Saldo negativo: há recurso em poder do engenheiro.',XS.info)]
+    [], [cT('Saldo positivo: o proprietário deve reembolsar o engenheiro. Saldo negativo: há recurso em poder do engenheiro.',XS.info)],
+    [cT(`Custos dia a dia com forma "A pagar" ainda pendentes (${fmtBRL(t.diaPend)}) entram no reembolso depois de pagos.`,XS.info)]
   ];
   const reemb = montarAba(RM,[46,22],[{s:{r:0,c:0},e:{r:0,c:1}},{s:{r:1,c:0},e:{r:1,c:1}}]);
   const linhas = [['Valor enviado', env.ref, t.enviado, false], ['Valor de Mão de Obra', mo.ref, t.mo, true], ['Valor de Material', mat.ref, t.material, true],
@@ -222,7 +232,8 @@ function construirWorkbook(obra, L, agrupamento, periodos){
   IM.push([cT('Valor de reembolso',XS.lbl), cF("'Reembolso'!B9", t.reembolso), cFs("'Reembolso'!B10", interpretaReemb(t.reembolso), XS.txt)]);
   IM.push([cT('VALOR TOTAL',XS.grandLbl), cF('B10+B11+B12+B13+B14', t.total, XS.grand), cT('',XS.grandLbl)]);
   IM.push([], [cT('Valor total = Mão de Obra + Material + Custos dia a dia + Salário + Valor a pagar.',XS.info)],
-    [cT('Valor de reembolso = Custos dia a dia − Valor enviado. Lançamentos cancelados não entram no relatório.',XS.info)]);
+    [cT('Valor de reembolso = Custos dia a dia já pagos − Valor enviado. Lançamentos cancelados não entram no relatório.',XS.info)],
+    [], [cT('Pendente de pagamento',XS.lbl), cM(t.pend), cT(t.qPend ? `${t.qPend} item(ns) · próximo vencimento ${fmtData(t.proxVenc)}` : 'nenhum',XS.txt)]);
   const inicio = montarAba(IM,[30,22,34],[{s:{r:0,c:0},e:{r:0,c:2}}]);
   [['Início',inicio],['Valor enviado',env.ws],['Mão de Obra',mo.ws],['Material',mat.ws],['Custos dia a dia',dia.ws],['Salário',sal.ws],['A pagar',pag.ws],['Reembolso',reemb]]
     .forEach(([n,ws])=>XLSX.utils.book_append_sheet(wb, ws, n));
@@ -287,14 +298,18 @@ function aplicarLocal(op){
       break; }
     case 'obra.arquivar': S.obras = S.obras.filter(o=>o.id!==d.id); break;
     case 'lanc.salvar': {
-      const rec = {...d, vu:round2(d.vu), total:round2(d.qtd*round2(d.vu)), status:d.categoria==='apagar'?'Pendente':'Pago', _pend:true};
-      if (d.categoria!=='dia') rec.subcat=''; if (d.categoria!=='enviado') rec.tipo=''; if (d.categoria!=='apagar') rec.venc='';
+      const rec = {...d, vu:round2(d.vu), total:round2(d.qtd*round2(d.vu)), status:(d.categoria==='apagar'||d.forma===FORMA_PEND)?'Pendente':'Pago', _pend:true};
+      if (d.categoria!=='dia') rec.subcat=''; if (d.categoria!=='enviado') rec.tipo=''; if (rec.status!=='Pendente') rec.venc='';
       const l = achar(S.lanc, d.id);
       if (l) Object.assign(l, rec);
       else S.lanc.push({...rec, comprovanteId:'', criadoPor:S.usuario.id, criadoEm:new Date(op.criadoEm).toISOString(), cancelado:false, motivoCancel:''});
       break; }
     case 'lanc.cancelar': { const l = achar(S.lanc, d.id); if (l) Object.assign(l, {cancelado:true, motivoCancel:d.motivo, _pend:true}); break; }
-    case 'lanc.pagar': { const l = achar(S.lanc, d.id); if (l && l.categoria==='apagar'){
+    case 'lanc.pagar': { const l = achar(S.lanc, d.id);
+      if (l && l.categoria!=='apagar' && l.forma===FORMA_PEND && l.status==='Pendente'){
+        const nota = `Pago em ${fmtData(d.data)} via ${d.forma} (previsto para ${fmtData(l.venc)})`;
+        Object.assign(l, {forma:d.forma, status:'Pago', obs:l.obs?l.obs+' | '+nota:nota, _pend:true}); break; }
+      if (l && l.categoria==='apagar'){
       const nota = `Previsto em "A pagar" (venc. ${fmtData(l.venc)})`;
       Object.assign(l, {categoria:d.categoria, data:d.data, forma:d.forma, status:'Pago', subcat:d.categoria==='dia'?d.subcat:'', mesRef:mesRefDe(d.data), obs:l.obs?l.obs+' | '+nota:nota, venc:'', _pend:true}); } break; }
     case 'periodo.salvar': { const p = achar(S.periodos, d.id); if (p) Object.assign(p, d); else S.periodos.push({...d}); break; }
@@ -338,7 +353,7 @@ async function sincronizar(manual){
     }
     FILA = FILA.filter(op=>!resp.has(op.opId));
     await kv.set('fila', FILA);
-    BASE = {usuario:r.usuario, cfg:r.cfg, obras:r.obras, lanc:r.lanc, periodos:r.periodos, nomes:r.nomes||{}};
+    BASE = {api:r.api||1, usuario:r.usuario, cfg:r.cfg, obras:r.obras, lanc:r.lanc, periodos:r.periodos, nomes:r.nomes||{}};
     SESSAO.usuario = r.usuario; await kv.set('sessao', SESSAO);
     await kv.set('cache', BASE);
     ultimoErroSync = ''; ultimoSyncOk = Date.now();
@@ -403,6 +418,7 @@ const perfil = () => S.usuario.perfil;
 const ehAdmin = () => perfil()==='admin';
 const ehProp = () => perfil()==='proprietario';
 const catsPermitidas = () => ehProp() ? CAT_PROPRIETARIO : CAT_ORDER;
+const podePagar = l => ehPendente(l) && !(ehProp() && l.categoria==='dia');
 const podeEditar = l => !l.cancelado && (ehAdmin() || l.criadoPor===S.usuario.id);
 
 /* ---------- tema ---------- */
@@ -544,7 +560,7 @@ function renderHome(){
   $('obrasGrid').className = obras.length ? 'obras-grid' : '';
   $('obrasGrid').innerHTML = obras.length ? obras.map(o=>{
     const L = S.lanc.filter(l=>l.obraId===o.id && !l.cancelado), t = totais(L), ult = L.reduce((m,l)=>l.data>m?l.data:m,'');
-    const pend = L.filter(l=>l.categoria==='apagar');
+    const pend = L.filter(ehPendente);
     const lblR = t.reembolso>0.004 ? 'A reembolsar' : t.reembolso<-0.004 ? 'Saldo em caixa' : 'Reembolso';
     const sub = [o.cidade, o.prop && 'Prop.: '+o.prop, o.ini && 'Início: '+fmtData(o.ini)].filter(Boolean).map(esc).join(' · ');
     return `<div class="obra-card">
@@ -555,7 +571,7 @@ function renderHome(){
         <div><span>Lançamentos</span><b>${L.length}</b></div>
         <div><span>Último lançamento</span><b>${ult ? fmtData(ult) : '—'}</b></div>
       </div>
-      ${pend.length ? `<div class="aviso">⏰ ${pend.length} pagamento(s) previsto(s): ${fmtBRL(t.apagar)}</div>` : ''}
+      ${pend.length ? `<div class="aviso">⏰ ${pend.length} pagamento(s) pendente(s): ${fmtBRL(t.pend)}${t.proxVenc?` · próximo ${fmtData(t.proxVenc).slice(0,5)}`:''}</div>` : ''}
       <div class="row"><button class="btn pri" data-open="${o.id}" type="button">Abrir obra →</button>
         <a class="btn" href="#/obra/${o.id}" target="_blank" rel="noopener" title="Abrir em outra aba">↗ Nova aba</a></div></div>`;
   }).join('') : `<div class="vazio"><b>Nenhuma obra disponível.</b><br>${ehProp() ? 'Peça ao administrador para liberar o acesso à sua obra.' : 'Cadastre a primeira obra abaixo.'}</div>`;
@@ -597,7 +613,7 @@ function renderListas(){
   $('f-un').innerHTML = S.cfg.unidades.map(u=>`<option value="${esc(u)}">${esc(u)}${UN_DESC[u]?' — '+esc(UN_DESC[u]):''}</option>`).join('') + '<option value="__outra">Outra (digitar)…</option>';
   if (unAtual) $('f-un').value = unAtual;
   fillSelect($('f-forma'), S.cfg.formas); fillSelect($('f-subcat'), S.cfg.subcats, 'Selecione...');
-  fillSelect($('pg-sub'), S.cfg.subcats, 'Selecione...'); fillSelect($('pg-forma'), S.cfg.formas);
+  fillSelect($('pg-sub'), S.cfg.subcats, 'Selecione...'); fillSelect($('pg-forma'), S.cfg.formas.filter(f=>f!==FORMA_PEND));
   fillSelect($('l-sub'), S.cfg.subcats, 'Todas'); fillSelect($('l-forma'), S.cfg.formas, 'Todas');
   $('pg-cat').innerHTML = (ehProp() ? ['mo','material'] : ['mo','material','dia']).map(k=>`<option value="${k}">${CATS[k].nome}</option>`).join('');
   $('dl-etapa').innerHTML = S.cfg.etapas.map(u=>`<option value="${esc(u)}">`).join('');
@@ -609,6 +625,11 @@ function renderListas(){
 function updateFormVisibility(){
   const cat = $('f-cat').value;
   document.querySelectorAll('#tab-lancar [data-show]').forEach(el=>{ el.hidden = !el.dataset.show.split(',').includes(cat); });
+  const optPend = [...$('f-forma').options].find(o=>o.value===FORMA_PEND);
+  if (optPend){ optPend.disabled = optPend.hidden = cat==='enviado'; if (cat==='enviado' && $('f-forma').value===FORMA_PEND) $('f-forma').value = S.cfg.formas[0]; }
+  const aPrazo = $('f-forma').value===FORMA_PEND && cat!=='apagar';
+  $('f-venc').closest('.fld').hidden = !(cat==='apagar' || aPrazo);
+  document.querySelector('label[for=f-venc]').textContent = aPrazo ? 'Data prevista de pagamento' : 'Vencimento';
   $('lbl-forn').textContent = cat==='enviado' ? 'Origem do recurso (quem enviou)' : cat==='mo' ? 'Beneficiário' : cat==='salario' ? 'Origem' : 'Fornecedor / Beneficiário';
   $('f-un-outra').hidden = $('f-un').value !== '__outra';
 }
@@ -648,12 +669,13 @@ function coletarForm(){
   if (!(q>0)) erros.push('quantitativo (maior que zero)');
   if (!(v>0)) erros.push('valor unitário (maior que zero)');
   if (cat==='dia' && !$('f-subcat').value) erros.push('subcategoria');
-  if (cat==='apagar' && !$('f-venc').value) erros.push('vencimento');
+  const pendente = cat==='apagar' || $('f-forma').value===FORMA_PEND;
+  if (pendente && !$('f-venc').value) erros.push(cat==='apagar' ? 'vencimento' : 'data prevista de pagamento');
   if (erros.length){ $('f-erro').textContent = 'Preencha: ' + erros.join(', ') + '.'; return null; }
   $('f-erro').textContent = '';
   const data = $('f-data').value;
   return { obraId:obraAtualId(), descricao:$('f-desc').value.trim(), data, forma:$('f-forma').value, categoria:cat, unidade:un, qtd:q, vu:round2(v),
-    subcat: cat==='dia' ? $('f-subcat').value : '', tipo: cat==='enviado' ? $('f-tipo').value : '', venc: cat==='apagar' ? $('f-venc').value : '',
+    subcat: cat==='dia' ? $('f-subcat').value : '', tipo: cat==='enviado' ? $('f-tipo').value : '', venc: pendente ? $('f-venc').value : '',
     fornecedor:$('f-forn').value.trim(), doc:$('f-doc').value.trim(), etapa:$('f-etapa').value.trim(), mesRef:$('f-mes').value || mesRefDe(data), obs:$('f-obs').value.trim() };
 }
 function possivelDuplicado(o, id){
@@ -663,6 +685,7 @@ function possivelDuplicado(o, id){
 }
 async function salvar(continuar){
   const o = coletarForm(); if (!o) return;
+  if (o.forma===FORMA_PEND && BASE && (BASE.api||1) < 2){ $('f-erro').textContent = 'O servidor ainda não aceita a forma "A pagar". O administrador precisa concluir a Parte 1 da atualização (Google).'; return; }
   const id = editingId || uid();
   const dup = possivelDuplicado(o, id);
   if (dup && !confirm(`Possível duplicidade:\n\n${fmtData(dup.data)} — ${dup.descricao} — ${fmtBRL(dup.total)} (${CATS[dup.categoria].nome})\n\nSalvar mesmo assim?`)) return;
@@ -728,13 +751,16 @@ function kpisFull(t){
   return CAT_ORDER.map(k=>{
     let sub = ''; if (k==='enviado') sub = t.reembRec ? `inclui ${fmtBRL(t.reembRec)} de reembolso` : 'não compõe o total';
     return kpiHTML(CATS[k].nome, t[k], CATS[k].cor, sub);
-  }).join('') + kpiHTML('Valor de reembolso', Math.abs(t.reembolso), '#607d8b', interpretaReemb(t.reembolso)) +
+  }).join('') + kpiHTML('Valor de reembolso', Math.abs(t.reembolso), '#607d8b', interpretaReemb(t.reembolso)) + kpiPend(t) +
   kpiHTML('VALOR TOTAL', t.total, '#1f4e78', 'MO + Material + Dia a dia + Salário + A pagar', 'total');
+}
+function kpiPend(t){
+  return kpiHTML('Pendente de pagamento', t.pend, '#8a6d00', t.qPend ? `${t.qPend} item(ns) · próximo venc. ${fmtData(t.proxVenc)}` : 'nada a pagar');
 }
 function renderMini(){
   const L = ativos(), t = totais(L), pend = lancObra().filter(l=>l._pend).length;
   $('miniKpis').innerHTML = kpiHTML('Custos dia a dia', t.dia, CATS.dia.cor) +
-    kpiHTML('Valor de reembolso', Math.abs(t.reembolso), '#607d8b', interpretaReemb(t.reembolso)) +
+    kpiHTML('Valor de reembolso', Math.abs(t.reembolso), '#607d8b', interpretaReemb(t.reembolso)) + kpiPend(t).replace('style="', 'style="grid-column:1/-1;') +
     kpiHTML('VALOR TOTAL', t.total, '#1f4e78', `${L.length} lançamento(s)${pend?` · ${pend} a enviar`:''}`, 'total');
   const ult = lancObra().slice().sort((a,b)=>String(b.criadoEm||'').localeCompare(String(a.criadoEm||''))).slice(0,6);
   $('ultimos').innerHTML = ult.length ? ult.map(l=>`<tr class="${l.cancelado?'cancel':''}"><td title="${fmtData(l.data)}">${fmtData(l.data).slice(0,5)}</td><td>${badge(l.categoria)}</td><td>${esc(l.descricao)} ${l._pend?'<span class="tag">⏳</span>':''}</td><td class="n">${fmtBRL(l.total)}</td>
@@ -749,9 +775,9 @@ function renderResumo(){
   const L = ativos().filter(l => (!ini || l.data>=ini) && (!fim || l.data<=fim)), t = totais(L);
   $('kpis').innerHTML = kpisFull(t);
   const hoje = hojeIso();
-  const pend = ativos().filter(l=>l.categoria==='apagar').sort((a,b)=>(a.venc||'').localeCompare(b.venc||''));
-  $('vencs').innerHTML = pend.length ? pend.map(l=>`<tr><td class="${l.venc<hoje?'venc-atraso':''}">${fmtData(l.venc)}${l.venc<hoje?' (vencido)':''}</td><td>${esc(l.descricao)}</td>
-    <td>${esc(l.fornecedor)}</td><td class="n">${fmtBRL(l.total)}</td><td><button class="btn sm pri" data-act="pagar" data-id="${l.id}" type="button">✓ Pago</button></td></tr>`).join('')
+  const pend = ativos().filter(ehPendente).sort((a,b)=>(a.venc||'').localeCompare(b.venc||''));
+  $('vencs').innerHTML = pend.length ? pend.map(l=>`<tr><td class="${l.venc<hoje?'venc-atraso':''}">${fmtData(l.venc)}${l.venc<hoje?' (vencido)':''}</td><td class="wrap">${badge(l.categoria)} ${esc(l.descricao)}</td>
+    <td>${esc(l.fornecedor)}</td><td class="n">${fmtBRL(l.total)}</td><td>${podePagar(l)?`<button class="btn sm pri" data-act="pagar" data-id="${l.id}" type="button">✓ Pago</button>`:''}</td></tr>`).join('')
     : `<tr><td colspan="5" class="muted">Nenhum pagamento previsto.</td></tr>`;
   if (typeof Chart === 'undefined' || !$('tab-resumo').classList.contains('on')) return;
   const css = getComputedStyle(document.documentElement);
@@ -781,14 +807,14 @@ const COLS_LISTA = [
   {k:'subcat',h:'Subcat./Tipo',f:l=>esc(l.subcat||l.tipo||'')}, {k:'forma',h:'Forma',f:l=>esc(l.forma)},
   {k:'qtd',h:'Qtd.',n:1,f:l=>fmtNum(l.qtd)}, {k:'unidade',h:'Un.',f:l=>esc(l.unidade)},
   {k:'vu',h:'V. unit.',n:1,f:l=>fmtBRL(l.vu)}, {k:'total',h:'Total',n:1,f:l=>`<b>${fmtBRL(l.total)}</b>`},
-  {k:'venc',h:'Venc./Status',f:l=>l.categoria==='apagar'?`${fmtData(l.venc)} · ${esc(l.status)}`:esc(l.status)},
+  {k:'venc',h:'Venc./Status',f:l=>ehPendente(l)?`<span class="${l.venc<hojeIso()?'venc-atraso':''}">${fmtData(l.venc)}</span> · <span class="tag">Pendente</span>`:esc(l.status)},
   {k:'criadoPor',h:'Lançado por',f:l=>esc(nomeUsuario(l.criadoPor))}
 ];
 function acoesLinha(l){
   let h = '';
   if (l.comprovanteId || l._compPend) h += `<button class="btn sm" data-act="comp" data-id="${l.id}" type="button" title="Ver comprovante">📎</button> `;
   if (l.cancelado) return h;
-  if (l.categoria==='apagar') h += `<button class="btn sm pri" data-act="pagar" data-id="${l.id}" type="button">✓ Pago</button> `;
+  if (podePagar(l)) h += `<button class="btn sm pri" data-act="pagar" data-id="${l.id}" type="button">✓ Pago</button> `;
   if (podeEditar(l)) h += `<button class="btn sm" data-act="edit" data-id="${l.id}" type="button" title="Editar">✎</button> `;
   if (catsPermitidas().includes(l.categoria)) h += `<button class="btn sm" data-act="dup" data-id="${l.id}" type="button" title="Duplicar">⧉</button> `;
   if (podeEditar(l)) h += `<button class="btn sm danger" data-act="cancel" data-id="${l.id}" type="button" title="Cancelar lançamento">✕</button>`;
@@ -836,7 +862,7 @@ async function carregarHistorico(){
       let det = '';
       if (a.acao==='lanc.criar') det = `${CATS[depois.categoria]?CATS[depois.categoria].nome:''} · ${fmtBRL(depois.total)}`;
       else if (a.acao==='lanc.cancelar') det = `Motivo: ${depois.motivoCancel||''}`;
-      else if (a.acao==='lanc.pagar') det = `→ ${CATS[depois.categoria]?CATS[depois.categoria].nome:''} em ${fmtData(depois.data)}`;
+      else if (a.acao==='lanc.pagar') det = antes.categoria==='apagar' ? `→ ${CATS[depois.categoria]?CATS[depois.categoria].nome:''} em ${fmtData(depois.data)}` : `Pago via ${depois.forma} · ${fmtBRL(depois.total)}`;
       else if (a.acao==='lanc.alterar' || a.acao==='obra.alterar') det = Object.keys(CAMPO_NOME).filter(k=>k in depois && String(antes[k]??'')!==String(depois[k]??''))
         .map(k=>`${CAMPO_NOME[k]}: ${k==='total'||k==='vu'?fmtBRL(antes[k]):esc(antes[k]??'')} → ${k==='total'||k==='vu'?fmtBRL(depois[k]):esc(depois[k]??'')}`).join('; ');
       return `<tr><td>${fmtDataHora(a.quando)}</td><td>${esc(a.usuario)}</td><td>${esc(ACAO_NOME[a.acao]||a.acao)}</td><td class="wrap">${esc(reg)}</td><td class="wrap">${a.acao.endsWith('alterar')?det:esc(det)}</td></tr>`;
@@ -867,8 +893,13 @@ async function acao(act, id){
   if (act==='cancel' && l && podeEditar(l)){ cancelandoId=id; $('cn-info').textContent=`${fmtData(l.data)} — ${l.descricao} — ${fmtBRL(l.total)}`; $('cn-motivo').value=''; $('cn-erro').textContent=''; $('dlgCancelar').showModal(); }
   if (act==='comp') verComprovante(id);
   if (act==='pagar' && l){
-    pagandoId=id; $('pg-info').textContent=`${l.descricao} — ${fmtBRL(l.total)} (venc. ${fmtData(l.venc)})`;
-    $('pg-cat').selectedIndex = 0; $('pg-data').value = hojeIso(); $('pg-forma').value = l.forma || S.cfg.formas[0]; $('pg-sub').value='';
+    const aPrazo = l.categoria!=='apagar';
+    pagandoId=id; $('pg-info').textContent = aPrazo
+      ? `${CATS[l.categoria].nome}: ${l.descricao} — ${fmtBRL(l.total)} (previsto para ${fmtData(l.venc)}). Informe quando e como foi pago.`
+      : `${l.descricao} — ${fmtBRL(l.total)} (venc. ${fmtData(l.venc)})`;
+    $('pg-cat').closest('.fld').hidden = aPrazo;
+    $('pg-cat').selectedIndex = 0; $('pg-data').value = hojeIso(); $('pg-sub').value='';
+    $('pg-forma').value = (l.forma && l.forma!==FORMA_PEND) ? l.forma : $('pg-forma').options[0].value;
     $('pg-subWrap').hidden = true; $('dlgPago').showModal();
   }
   if (act==='delper' && confirm('Remover este período?')){ await enfileirar('periodo.excluir', {id}); renderObra(); sincronizar(); }
@@ -886,6 +917,10 @@ async function confirmarPago(){
   const l = S.lanc.find(x=>x.id===pagandoId); if (!l) return;
   const cat=$('pg-cat').value, data=$('pg-data').value;
   if (!data){ alert('Informe a data do pagamento.'); return; }
+  if (l.categoria!=='apagar'){
+    await enfileirar('lanc.pagar', {id:pagandoId, data, forma:$('pg-forma').value});
+    $('dlgPago').close(); renderObra(); toast(`Pagamento registrado (${$('pg-forma').value})`); sincronizar(); return;
+  }
   if (cat==='dia' && !$('pg-sub').value){ alert('Selecione a subcategoria.'); return; }
   await enfileirar('lanc.pagar', {id:pagandoId, categoria:cat, data, forma:$('pg-forma').value, subcat:cat==='dia'?$('pg-sub').value:''});
   $('dlgPago').close(); renderObra(); toast(`Pagamento registrado em ${CATS[cat].nome}`); sincronizar();
@@ -1054,6 +1089,7 @@ function ligarEventos(){
   $('btnExcel').onclick = gerarExcel;
   document.querySelectorAll('#view-obra nav button').forEach(b=>b.onclick=()=>abrirTab(b.dataset.tab));
   $('f-cat').onchange = updateFormVisibility;
+  $('f-forma').onchange = updateFormVisibility;
   $('f-un').onchange = ()=>{ updateFormVisibility(); if ($('f-un').value==='__outra') $('f-un-outra').focus(); };
   $('f-qtd').oninput = $('f-vu').oninput = calcTotal;
   $('f-data').onchange = ()=>{ $('f-mes').value = mesRefDe($('f-data').value); };

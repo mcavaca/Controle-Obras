@@ -1,13 +1,14 @@
 /* Service worker: guarda o aplicativo no aparelho para abrir sem internet.
    Os dados NÃO passam por aqui — ficam no IndexedDB e vão ao servidor pela fila. */
-const VERSAO = 'co-v1.1.0';
+const VERSAO = 'co-v1.2.0';
 const ARQUIVOS = [
   './', 'index.html', 'app.js', 'theme.js', 'manifest.webmanifest',
   'xlsx.bundle.js', 'chart.umd.js', 'icon-192.png', 'icon-512.png'
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(VERSAO).then((c) => c.addAll(ARQUIVOS)));
+  // cache: 'reload' garante que a versão nova dos arquivos seja baixada (e não uma cópia antiga do navegador)
+  e.waitUntil(caches.open(VERSAO).then((c) => c.addAll(ARQUIVOS.map((u) => new Request(u, { cache: 'reload' })))));
 });
 
 self.addEventListener('activate', (e) => {
