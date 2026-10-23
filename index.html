@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
+<meta name="color-scheme" content="light dark">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https://script.google.com https://script.googleusercontent.com; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#1f4e78">
+<title>Controle de Obras</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<script src="theme.js"></script>
+<script src="xlsx.bundle.js" defer></script>
+<script src="chart.umd.js" defer></script>
+<script src="app.js" defer></script>
+<style>
+:root{
+  color-scheme:light;
+  --bg:#f3f5f8;--card:#ffffff;--txt:#1b2333;--mut:#5b6474;--bd:#d9dee7;--in:#ffffff;--soft:#eef3f9;
+  --pri:#1f4e78;--pri-h:#173d5e;--link:#1f4e78;--hdr:#1f4e78;--acc:#b5520f;--err:#c62828;
+  --warnBg:#fff4e5;--warnTxt:#7a4200;--okBg:#e8f5e9;--okTxt:#1b5e20;
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#0f1319;--card:#19202a;--txt:#e8ecf2;--mut:#a7b1c1;--bd:#2f3847;--in:#121821;--soft:#232c39;
+  --pri:#2f6aa3;--pri-h:#3a7bbb;--link:#8cbcf0;--hdr:#15263a;--acc:#a5480c;--err:#ff8080;
+  --warnBg:#3a2a12;--warnTxt:#ffd08f;--okBg:#173322;--okTxt:#9be0a8;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --bg:#0f1319;--card:#19202a;--txt:#e8ecf2;--mut:#a7b1c1;--bd:#2f3847;--in:#121821;--soft:#232c39;
+    --pri:#2f6aa3;--pri-h:#3a7bbb;--link:#8cbcf0;--hdr:#15263a;--acc:#a5480c;--err:#ff8080;
+    --warnBg:#3a2a12;--warnTxt:#ffd08f;--okBg:#173322;--okTxt:#9be0a8;
+  }
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;background:var(--bg);color:var(--txt);font-size:15px;line-height:1.4}
+header{background:var(--hdr);color:#fff;padding:12px 16px;padding-top:max(12px,env(safe-area-inset-top));display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center}
+header .titulo{flex:1 1 180px;min-width:0}
+header h1{font-size:17px;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+header small{display:block;font-size:12px;opacity:.9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+nav{display:flex;gap:4px;padding:8px 16px 0;overflow-x:auto;background:var(--bg);position:sticky;top:0;z-index:15;border-bottom:1px solid var(--bd)}
+nav button{flex:0 0 auto;border:0;background:transparent;color:var(--mut);padding:10px 14px;border-bottom:3px solid transparent;font-size:14px;font-weight:600;cursor:pointer}
+nav button.on{color:var(--link);border-bottom-color:var(--link)}
+main{max-width:1200px;margin:0 auto;padding:16px;padding-bottom:max(16px,env(safe-area-inset-bottom))}
+section.tab{display:none}section.tab.on{display:block}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:16px;margin-bottom:16px}
+.card h2{font-size:16px;margin:0 0 12px}
+h2.sec{font-size:17px;margin:8px 0 12px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px}
+.fld label{display:block;font-size:12px;color:var(--mut);margin-bottom:4px;font-weight:600}
+.fld.req label::after{content:" *";color:var(--err)}
+.fld.wide{grid-column:1/-1}
+input,select,textarea{width:100%;padding:10px;border:1px solid var(--bd);border-radius:8px;font-size:15px;background:var(--in);color:var(--txt);font-family:inherit}
+input[type=checkbox]{width:auto;accent-color:var(--pri)}
+input::placeholder{color:var(--mut);opacity:.8}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--link);outline-offset:0;border-color:transparent}
+input[readonly]{background:var(--soft);font-weight:700}
+textarea{min-height:120px;resize:vertical}
+.btn{display:inline-block;text-decoration:none;border:1px solid var(--bd);background:var(--card);color:var(--txt);border-radius:8px;padding:10px 14px;font-size:14px;font-weight:600;cursor:pointer;line-height:1.2}
+.btn:disabled{opacity:.55;cursor:not-allowed}
+.btn.pri{background:var(--pri);border-color:var(--pri);color:#fff}.btn.pri:hover:not(:disabled){background:var(--pri-h)}
+.btn.acc{background:var(--acc);border-color:var(--acc);color:#fff}
+.btn.danger{color:var(--err);border-color:var(--err);background:transparent}
+.btn.hdr{background:rgba(255,255,255,.14);color:#fff;border-color:rgba(255,255,255,.35)}
+.btn.sm{padding:5px 8px;font-size:12px}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.erro{color:var(--err);font-size:13px;min-height:18px;margin-top:8px}
+.muted{color:var(--mut);font-size:13px}
+.chk{display:flex;gap:8px;align-items:center;font-size:14px;padding:4px 0}
+.kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:10px}
+.kpi{background:var(--card);border:1px solid var(--bd);border-left:5px solid var(--c,#999);border-radius:10px;padding:12px}
+.kpi .l{font-size:12px;color:var(--mut);font-weight:600}
+.kpi .v{font-size:19px;font-weight:700;margin-top:4px;white-space:nowrap}
+.kpi .s{font-size:12px;color:var(--mut);margin-top:2px}
+.kpi.total{background:var(--pri);color:#fff;border-color:var(--pri)}.kpi.total .l,.kpi.total .s{color:#e3edf8}
+.tbl-wrap{overflow-x:auto;border:1px solid var(--bd);border-radius:10px;background:var(--card)}
+table{border-collapse:collapse;width:100%;font-size:13px;color:var(--txt)}
+th,td{padding:8px 10px;border-bottom:1px solid var(--bd);white-space:nowrap;text-align:left;vertical-align:top}
+th{background:var(--soft);cursor:pointer;user-select:none;font-size:12px}
+td.n,th.n{text-align:right}
+td.wrap{white-space:normal;min-width:220px}
+tr.grp td{background:var(--soft);font-weight:700}
+tr.sub td{font-weight:700;border-bottom:2px solid var(--bd)}
+tr.cancel td{opacity:.6;text-decoration:line-through}
+tr.cancel td:last-child{text-decoration:none}
+tfoot td{font-weight:700;background:var(--soft)}
+.badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:700;color:#fff;background:var(--c,#888)}
+.tag{display:inline-block;padding:1px 6px;border-radius:6px;font-size:11px;font-weight:700;background:var(--warnBg);color:var(--warnTxt)}
+.tag.ok{background:var(--okBg);color:var(--okTxt)}
+.chips{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;margin-bottom:10px}
+.chip{flex:0 0 auto;border:1px solid var(--bd);background:var(--card);color:var(--txt);border-radius:20px;padding:6px 12px;font-size:13px;cursor:pointer}
+.chip.on{background:var(--pri);color:#fff;border-color:var(--pri)}
+.sync{border:1px solid rgba(255,255,255,.35);background:rgba(255,255,255,.12);color:#fff;border-radius:20px;padding:5px 10px;font-size:12px;font-weight:700;cursor:pointer}
+.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
+.chartbox{position:relative;height:280px}
+.venc-atraso{color:var(--err);font-weight:700}
+.obras-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;margin-bottom:20px}
+.obra-card{background:var(--card);border:1px solid var(--bd);border-top:4px solid var(--pri);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:10px}
+.obra-card h3{margin:0;font-size:16px}
+.oc-nums{display:grid;grid-template-columns:1fr 1fr;gap:10px;background:var(--soft);border-radius:8px;padding:10px}
+.oc-nums span{display:block;font-size:11px;color:var(--mut);font-weight:600}
+.oc-nums b{font-size:15px}
+.aviso{font-size:13px;font-weight:600;color:var(--warnTxt);background:var(--warnBg);padding:8px 10px;border-radius:8px}
+.vazio{text-align:center;padding:28px 16px;color:var(--mut);border:2px dashed var(--bd);border-radius:12px;margin-bottom:20px}
+details.cfg>summary{cursor:pointer;font-weight:700;font-size:16px;list-style:none}
+details.cfg>summary::before{content:"▸ ";color:var(--mut)}details.cfg[open]>summary::before{content:"▾ "}
+.login-wrap{max-width:420px;margin:24px auto}
+.comp-prev{display:flex;gap:10px;align-items:center;margin-top:8px}
+.comp-prev img{max-width:72px;max-height:72px;border-radius:6px;border:1px solid var(--bd)}
+.visor img{max-width:100%;border-radius:8px}
+.senha-box{font-family:ui-monospace,Consolas,monospace;font-size:20px;font-weight:700;text-align:center;padding:12px;border:2px dashed var(--bd);border-radius:8px;user-select:all}
+dialog{border:1px solid var(--bd);border-radius:12px;padding:0;max-width:460px;width:calc(100% - 32px);background:var(--card);color:var(--txt)}
+dialog.largo{max-width:900px}
+dialog::backdrop{background:rgba(0,0,0,.55)}
+dialog .card{margin:0;border:0}
+#toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:#1b2333;color:#fff;border:1px solid #3a4558;padding:10px 16px;border-radius:8px;font-size:14px;opacity:0;transition:opacity .25s;pointer-events:none;z-index:50;max-width:90%}
+#toast.on{opacity:1}
+#barraAtualizacao{position:fixed;left:0;right:0;bottom:0;background:var(--pri);color:#fff;padding:10px 16px;display:flex;gap:10px;align-items:center;justify-content:center;z-index:40}
+@media (max-width:600px){header h1{font-size:15px}.kpi .v{font-size:17px}main{padding:12px}}
+.acoes-form{margin-top:8px}
+.versao{text-align:center;color:var(--mut);font-size:12px;margin:8px 0 24px}
+
+/* ===== Edição tablet (Galaxy Tab S10 FE+ e similares) =====
+   Telas de toque a partir de 700px: alvos maiores e texto 16px (evita zoom ao digitar). */
+@media (min-width:700px) and (pointer:coarse){
+  body{font-size:16px}
+  header{padding:14px 20px}
+  header h1{font-size:19px}
+  main{padding:20px 24px}
+  .btn{min-height:46px;padding:12px 18px;font-size:15px}
+  .btn.sm{min-height:38px;padding:8px 12px;font-size:13px}
+  .btn.hdr.sm,.btn.acc.sm{min-height:40px}
+  input,select,textarea{min-height:50px;font-size:16px;padding:12px}
+  textarea{min-height:140px}
+  .fld label{font-size:13px}
+  nav{padding:8px 24px 0}
+  nav button{padding:14px 20px;font-size:15px}
+  th,td{padding:12px;font-size:14px}
+  th{font-size:13px}
+  .chip{padding:10px 16px;font-size:14px}
+  .sync{padding:9px 14px;font-size:13px;min-height:40px}
+  .chk{font-size:15px;padding:8px 0}.chk input{width:22px;height:22px}
+  .kpi{padding:14px}.kpi .v{font-size:21px}
+  .grid{gap:16px}
+  dialog{max-width:560px}
+  /* botões de salvar sempre à mão, mesmo com o teclado aberto */
+  .acoes-form{position:sticky;bottom:0;z-index:5;background:var(--card);margin:8px -16px -16px;padding:12px 16px;border-top:1px solid var(--bd);border-radius:0 0 12px 12px}
+}
+/* Paisagem do tablet (1280 px ou mais) e computador: formulário à esquerda, resumo e últimos lançamentos à direita */
+@media (min-width:1180px){
+  main{max-width:1440px}
+  #tab-lancar.on{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(330px,1fr);gap:20px;align-items:start}
+  #tab-lancar .lado{position:sticky;top:64px}
+  #tab-lancar .lado .kpis{grid-template-columns:1fr 1fr}
+  #tab-lancar .lado .kpi.total{grid-column:1/-1}
+  #tab-lancar > .card{margin-bottom:0}
+  #tab-lancar .lado td{white-space:normal;padding:10px 8px}
+  #tab-lancar .lado td .badge{white-space:nowrap}
+  #tab-lancar .grid{grid-template-columns:repeat(auto-fill,minmax(200px,1fr))}
+  #view-home main{display:grid;grid-template-columns:1fr 1fr;gap:0 20px;align-items:start}
+  #view-home main > h2.sec,#view-home main > .obras-grid,#view-home main > #boxRejeitados,#view-home main > .vazio{grid-column:1/-1}
+  #view-home #obrasGrid.obras-grid{grid-template-columns:repeat(auto-fill,minmax(320px,1fr))}
+  #view-home #obrasGrid:not(.obras-grid){grid-column:1/-1}
+}
+</style>
+</head>
+<body>
+
+<!-- ======================= LOGIN ======================= -->
+<div id="view-login" hidden>
+  <header>
+    <div class="titulo"><h1>🏗️ Controle de Obras</h1><small>Acesso restrito</small></div>
+    <button class="btn hdr sm btnTema" type="button"></button>
+  </header>
+  <main>
+    <div class="login-wrap">
+      <div class="card" id="boxServidor" hidden>
+        <h2>Conectar ao servidor</h2>
+        <p class="muted">Cole o endereço do servidor (Apps Script) informado pelo administrador. Ele termina em <b>/exec</b>.</p>
+        <div class="fld"><label for="s-url">Endereço do servidor</label><input id="s-url" inputmode="url" autocomplete="off" placeholder="https://script.google.com/macros/s/.../exec"></div>
+        <div class="erro" id="s-erro"></div>
+        <button class="btn pri" id="s-ok" type="button">Conectar</button>
+      </div>
+      <div class="card" id="boxLogin" hidden>
+        <h2>Entrar</h2>
+        <div class="grid" style="grid-template-columns:1fr">
+          <div class="fld"><label for="lg-user">Usuário</label><input id="lg-user" autocomplete="username" autocapitalize="none" spellcheck="false"></div>
+          <div class="fld"><label for="lg-pass">Senha</label><input id="lg-pass" type="password" autocomplete="current-password"></div>
+        </div>
+        <div class="erro" id="lg-erro"></div>
+        <div class="row"><button class="btn pri" id="lg-ok" type="button">Entrar</button>
+          <button class="btn sm" id="lg-servidor" type="button" style="margin-left:auto">Trocar servidor</button></div>
+        <p class="muted" id="lg-aviso" style="margin-bottom:0"></p>
+      </div>
+      <div class="card" id="boxTroca" hidden>
+        <h2>Crie sua senha</h2>
+        <p class="muted">Por segurança, troque a senha provisória. Use pelo menos 8 caracteres, com letras e números.</p>
+        <div class="grid" style="grid-template-columns:1fr">
+          <div class="fld"><label for="tr-atual">Senha atual (provisória)</label><input id="tr-atual" type="password" autocomplete="current-password"></div>
+          <div class="fld"><label for="tr-nova">Nova senha</label><input id="tr-nova" type="password" autocomplete="new-password"></div>
+          <div class="fld"><label for="tr-conf">Confirme a nova senha</label><input id="tr-conf" type="password" autocomplete="new-password"></div>
+        </div>
+        <div class="erro" id="tr-erro"></div>
+        <div class="row"><button class="btn pri" id="tr-ok" type="button">Salvar senha</button><button class="btn" id="tr-sair" type="button">Cancelar</button></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- ======================= INÍCIO ======================= -->
+<div id="view-home" hidden>
+  <header>
+    <div class="titulo"><h1>🏗️ Controle de Obras</h1><small id="homeUser"></small></div>
+    <button class="sync" type="button"></button>
+    <button class="btn hdr sm btnTema" type="button"></button>
+    <button class="btn hdr sm" id="btnSair" type="button">Sair</button>
+  </header>
+  <main>
+    <div id="boxRejeitados" class="card" hidden></div>
+    <h2 class="sec">Obras</h2>
+    <div id="obrasGrid" class="obras-grid"></div>
+
+    <div class="card" id="cardCadastro">
+      <h2>Cadastrar nova obra</h2>
+      <div class="grid">
+        <div class="fld req wide"><label for="n-nome">Nome da obra</label><input id="n-nome" placeholder="Ex.: Galpão Buriticupu"></div>
+        <div class="fld"><label for="n-cidade">Cidade/UF</label><input id="n-cidade" placeholder="Ex.: Buriticupu/MA"></div>
+        <div class="fld"><label for="n-prop">Proprietário / Contratante</label><input id="n-prop"></div>
+        <div class="fld"><label for="n-eng">Engenheiro responsável</label><input id="n-eng"></div>
+        <div class="fld"><label for="n-ini">Data de início</label><input id="n-ini" type="date"></div>
+      </div>
+      <div class="erro" id="n-erro"></div>
+      <div class="row"><button class="btn pri" id="n-abrir" type="button">Cadastrar e abrir</button><button class="btn" id="n-salvar" type="button">Só cadastrar</button></div>
+    </div>
+
+    <div class="card" id="cardAdmin" hidden>
+      <h2>Administração</h2>
+      <div class="row">
+        <button class="btn pri" id="btnUsuarios" type="button">👥 Usuários e acessos</button>
+        <button class="btn" id="b-ex" type="button">Criar obra de exemplo</button>
+        <button class="btn" id="b-exp" type="button">Exportar cópia (JSON)</button>
+      </div>
+      <details class="cfg" style="margin-top:16px">
+        <summary>Listas do sistema (valem para todas as obras)</summary>
+        <div style="margin-top:14px">
+          <div class="grid">
+            <div class="fld"><label for="c-sub">Subcategorias (custos dia a dia)</label><textarea id="c-sub"></textarea></div>
+            <div class="fld"><label for="c-un">Unidades</label><textarea id="c-un"></textarea></div>
+            <div class="fld"><label for="c-formas">Formas de pagamento</label><textarea id="c-formas"></textarea></div>
+            <div class="fld"><label for="c-etapas">Etapas da obra</label><textarea id="c-etapas"></textarea></div>
+          </div>
+          <p class="muted">Um item por linha. Requer internet.</p>
+          <div class="row"><button class="btn pri" id="c-salvar" type="button">Salvar listas</button></div>
+        </div>
+      </details>
+    </div>
+
+    <div class="card">
+      <h2>Minha conta</h2>
+      <p class="muted" id="contaInfo"></p>
+      <div class="row"><button class="btn" id="btnMinhaSenha" type="button">Trocar minha senha</button></div>
+    </div>
+  </main>
+</div>
+
+<!-- ======================= OBRA ======================= -->
+<div id="view-obra" hidden>
+  <header>
+    <button class="btn hdr sm" id="btnInicio" type="button">← Início</button>
+    <div class="titulo"><h1 id="obraTitulo"></h1><small id="obraSub"></small></div>
+    <button class="sync" type="button"></button>
+    <button class="btn hdr sm btnTema" type="button"></button>
+    <button class="btn acc sm" id="btnExcel" type="button">⬇ Gerar Excel</button>
+  </header>
+  <nav>
+    <button data-tab="lancar" class="on" type="button">Lançar</button>
+    <button data-tab="resumo" type="button">Resumo</button>
+    <button data-tab="lista" type="button">Lançamentos</button>
+    <button data-tab="hist" type="button">Histórico</button>
+    <button data-tab="obra" type="button">Dados da obra</button>
+  </nav>
+  <main>
+  <section class="tab on" id="tab-lancar">
+    <div class="card">
+      <h2 id="formTitulo">Novo lançamento</h2>
+      <div class="grid">
+        <div class="fld req wide"><label for="f-desc">Descrição do item</label><input id="f-desc" autocomplete="off" maxlength="200" enterkeyhint="next" autocapitalize="sentences" placeholder="Ex.: Abastecimento, Milheiro de tijolo, Quinzena..."></div>
+        <div class="fld req"><label for="f-data">Data</label><input id="f-data" type="date"></div>
+        <div class="fld req"><label for="f-cat">Categoria</label><select id="f-cat"></select></div>
+        <div class="fld req"><label for="f-forma">Forma de pagamento</label><select id="f-forma"></select></div>
+        <div class="fld req" data-show="dia"><label for="f-subcat">Subcategoria</label><select id="f-subcat"></select></div>
+        <div class="fld req" data-show="enviado"><label for="f-tipo">Tipo do envio</label>
+          <select id="f-tipo"><option>Adiantamento para custos</option><option>Reembolso recebido</option></select></div>
+        <div class="fld req" data-show="apagar"><label for="f-venc">Vencimento</label><input id="f-venc" type="date"></div>
+        <div class="fld req"><label for="f-un">Unidade</label><select id="f-un"></select>
+          <input id="f-un-outra" placeholder="Digite a unidade" maxlength="30" style="margin-top:6px" hidden></div>
+        <div class="fld req"><label for="f-qtd">Quantitativo</label><input id="f-qtd" inputmode="decimal" autocomplete="off"></div>
+        <div class="fld req"><label for="f-vu">Valor unitário (R$)</label><input id="f-vu" inputmode="decimal" autocomplete="off" placeholder="0,00"></div>
+        <div class="fld"><label for="f-total">Valor total (R$)</label><input id="f-total" readonly tabindex="-1"></div>
+        <div class="fld wide"><label for="f-comp">Comprovante (foto da nota/recibo ou PDF)</label>
+          <input id="f-comp" type="file" accept="image/*,application/pdf">
+          <div class="comp-prev" id="f-compPrev" hidden><span id="f-compInfo" class="muted"></span><button class="btn sm" id="f-compRem" type="button">Remover</button></div></div>
+      </div>
+      <details style="margin-top:12px">
+        <summary class="muted" style="cursor:pointer">Campos complementares (fornecedor, documento, etapa, observações)</summary>
+        <div class="grid" style="margin-top:12px">
+          <div class="fld"><label for="f-forn" id="lbl-forn">Fornecedor</label><input id="f-forn" list="dl-forn" autocomplete="off" maxlength="120"></div>
+          <div class="fld"><label for="f-doc">Nº NF / Recibo / Documento</label><input id="f-doc" autocomplete="off" maxlength="60"></div>
+          <div class="fld" data-show="mo,material,dia,apagar"><label for="f-etapa">Etapa da obra</label><input id="f-etapa" list="dl-etapa" autocomplete="off" maxlength="60"></div>
+          <div class="fld"><label for="f-mes">Mês de referência</label><input id="f-mes" type="month"></div>
+          <div class="fld wide"><label for="f-obs">Observações</label><input id="f-obs" autocomplete="off" maxlength="500" placeholder="Ex.: Extrato Santander Ag. xxxx CC xxxx"></div>
+        </div>
+      </details>
+      <div class="erro" id="f-erro"></div>
+      <div class="row acoes-form">
+        <button class="btn pri" id="btnSalvar" type="button">Salvar</button>
+        <button class="btn" id="btnSalvarOutro" type="button">Salvar e lançar outro</button>
+        <button class="btn" id="btnCancelar" type="button" hidden>Cancelar edição</button>
+        <button class="btn" id="btnLimparForm" type="button">Limpar</button>
+      </div>
+    </div>
+    <div class="lado">
+      <div class="kpis" id="miniKpis"></div>
+      <div class="card" style="margin-top:16px">
+        <h2>Últimos lançamentos</h2>
+        <div class="tbl-wrap"><table><tbody id="ultimos"></tbody></table></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="tab" id="tab-resumo">
+    <div class="card"><div class="row">
+      <div class="fld"><label for="r-ini">De</label><input id="r-ini" type="date"></div>
+      <div class="fld"><label for="r-fim">Até</label><input id="r-fim" type="date"></div>
+      <button class="btn" id="r-limpar" type="button" style="align-self:flex-end">Todo o período</button>
+    </div></div>
+    <div class="kpis" id="kpis"></div>
+    <div class="charts" style="margin-top:16px">
+      <div class="card"><h2>Composição do valor total</h2><div class="chartbox"><canvas id="chComp"></canvas></div><p class="muted" id="compVazio" hidden>Sem valores no período selecionado.</p></div>
+      <div class="card"><h2>Custos dia a dia por subcategoria</h2><div class="chartbox"><canvas id="chSub"></canvas></div><p class="muted" id="subVazio" hidden>Sem custos dia a dia no período selecionado.</p></div>
+    </div>
+    <div class="card">
+      <h2>Próximos vencimentos (A pagar)</h2>
+      <div class="tbl-wrap"><table><thead><tr><th>Vencimento</th><th>Descrição</th><th>Fornecedor</th><th class="n">Valor</th><th></th></tr></thead><tbody id="vencs"></tbody></table></div>
+    </div>
+  </section>
+
+  <section class="tab" id="tab-lista">
+    <div class="chips" id="catChips"></div>
+    <div class="card">
+      <div class="grid">
+        <div class="fld"><label for="l-ini">De</label><input id="l-ini" type="date"></div>
+        <div class="fld"><label for="l-fim">Até</label><input id="l-fim" type="date"></div>
+        <div class="fld"><label for="l-sub">Subcategoria</label><select id="l-sub"></select></div>
+        <div class="fld"><label for="l-forma">Forma de pagamento</label><select id="l-forma"></select></div>
+        <div class="fld"><label for="l-txt">Buscar</label><input id="l-txt" placeholder="Descrição, fornecedor, doc..."></div>
+        <div class="fld" id="l-agrWrap"><label for="l-agr">Agrupar custos por</label>
+          <select id="l-agr"><option value="semana">Semana</option><option value="quinzena">Quinzena</option><option value="mes">Mês</option><option value="personalizado">Períodos personalizados</option><option value="nenhum">Sem agrupamento</option></select></div>
+      </div>
+      <label class="chk" style="margin-top:8px"><input type="checkbox" id="l-canc"> Mostrar lançamentos cancelados</label>
+    </div>
+    <div class="tbl-wrap"><table>
+      <thead><tr id="listaHead"></tr></thead>
+      <tbody id="listaBody"></tbody>
+      <tfoot id="listaFoot"></tfoot>
+    </table></div>
+  </section>
+
+  <section class="tab" id="tab-hist">
+    <div class="card">
+      <h2>Histórico de alterações (auditoria)</h2>
+      <p class="muted">Registro permanente feito pelo servidor: quem lançou, alterou, cancelou ou anexou cada item. Requer internet.</p>
+      <button class="btn" id="h-atualizar" type="button">Atualizar</button>
+    </div>
+    <div class="tbl-wrap"><table><thead><tr><th>Quando</th><th>Usuário</th><th>Ação</th><th>Registro</th><th>Detalhes</th></tr></thead><tbody id="histBody"></tbody></table></div>
+  </section>
+
+  <section class="tab" id="tab-obra">
+    <div class="card">
+      <h2>Dados da obra</h2>
+      <div class="grid">
+        <div class="fld req wide"><label for="o-nome">Nome da obra</label><input id="o-nome" maxlength="120"></div>
+        <div class="fld"><label for="o-cidade">Cidade/UF</label><input id="o-cidade" maxlength="80"></div>
+        <div class="fld"><label for="o-prop">Proprietário / Contratante</label><input id="o-prop" maxlength="120"></div>
+        <div class="fld"><label for="o-eng">Engenheiro responsável</label><input id="o-eng" maxlength="120"></div>
+        <div class="fld"><label for="o-ini">Data de início</label><input id="o-ini" type="date"></div>
+      </div>
+      <div class="row" style="margin-top:12px"><button class="btn pri" id="o-salvar" type="button">Salvar dados da obra</button></div>
+    </div>
+    <div class="card" id="cardPeriodos">
+      <h2>Períodos personalizados (agrupamento dos custos dia a dia)</h2>
+      <div class="grid" id="perForm">
+        <div class="fld"><label for="p-nome">Nome</label><input id="p-nome" maxlength="80" placeholder="Ex.: Estadia inicial"></div>
+        <div class="fld"><label for="p-ini">Início</label><input id="p-ini" type="date"></div>
+        <div class="fld"><label for="p-fim">Fim</label><input id="p-fim" type="date"></div>
+        <button class="btn" id="p-add" type="button" style="align-self:flex-end">Adicionar período</button>
+      </div>
+      <div class="tbl-wrap" style="margin-top:12px"><table><tbody id="perList"></tbody></table></div>
+    </div>
+    <div class="card" id="cardArquivar" hidden>
+      <h2>Arquivar obra</h2>
+      <p class="muted">A obra sai da lista de todos os usuários, mas os dados, comprovantes e relatórios continuam guardados no Drive.</p>
+      <button class="btn danger" id="o-arquivar" type="button">Arquivar esta obra</button>
+    </div>
+  </section>
+  </main>
+</div>
+
+<!-- ======================= USUÁRIOS (ADMIN) ======================= -->
+<div id="view-admin" hidden>
+  <header>
+    <button class="btn hdr sm" id="btnAdminVoltar" type="button">← Início</button>
+    <div class="titulo"><h1>Usuários e acessos</h1><small>Somente administrador · requer internet</small></div>
+    <button class="btn hdr sm btnTema" type="button"></button>
+  </header>
+  <main>
+    <div class="card">
+      <h2 id="uTitulo">Novo usuário</h2>
+      <div class="grid">
+        <div class="fld req"><label for="u-nome">Nome</label><input id="u-nome" maxlength="80"></div>
+        <div class="fld req"><label for="u-login">Usuário (login)</label><input id="u-login" maxlength="30" autocapitalize="none" spellcheck="false" placeholder="ex.: jose.silva"></div>
+        <div class="fld"><label for="u-email">E-mail (opcional)</label><input id="u-email" type="email" maxlength="120"></div>
+        <div class="fld req"><label for="u-perfil">Perfil</label>
+          <select id="u-perfil"><option value="engenheiro">Engenheiro — lança e acompanha</option><option value="proprietario">Proprietário — consulta e lança envios/pagamentos</option><option value="admin">Administrador — acesso total</option></select></div>
+      </div>
+      <label class="chk" style="margin-top:10px"><input type="checkbox" id="u-ativo" checked> Usuário ativo</label>
+      <div id="u-obrasWrap" style="margin-top:10px">
+        <div class="muted" style="font-weight:600;margin-bottom:4px">Obras que este usuário pode acessar</div>
+        <div id="u-obras"></div>
+      </div>
+      <div class="erro" id="u-erro"></div>
+      <div class="row"><button class="btn pri" id="u-salvar" type="button">Salvar usuário</button><button class="btn" id="u-novo" type="button">Limpar</button></div>
+    </div>
+    <div class="tbl-wrap"><table><thead><tr><th>Nome</th><th>Usuário</th><th>Perfil</th><th>Obras</th><th>Último acesso</th><th>Situação</th><th>Ações</th></tr></thead><tbody id="uLista"></tbody></table></div>
+  </main>
+</div>
+
+<datalist id="dl-etapa"></datalist>
+<datalist id="dl-forn"></datalist>
+
+<dialog id="dlgPago"><div class="card">
+  <h2>Registrar pagamento</h2>
+  <p class="muted" id="pg-info"></p>
+  <div class="grid" style="grid-template-columns:1fr">
+    <div class="fld req"><label for="pg-cat">Lançar na categoria</label><select id="pg-cat"></select></div>
+    <div class="fld req" id="pg-subWrap" hidden><label for="pg-sub">Subcategoria</label><select id="pg-sub"></select></div>
+    <div class="fld req"><label for="pg-data">Data do pagamento</label><input id="pg-data" type="date"></div>
+    <div class="fld req"><label for="pg-forma">Forma de pagamento</label><select id="pg-forma"></select></div>
+  </div>
+  <div class="row" style="margin-top:14px;justify-content:flex-end"><button class="btn" id="pg-cancel" type="button">Voltar</button><button class="btn pri" id="pg-ok" type="button">Confirmar pagamento</button></div>
+</div></dialog>
+
+<dialog id="dlgCancelar"><div class="card">
+  <h2>Cancelar lançamento</h2>
+  <p class="muted" id="cn-info"></p>
+  <p class="muted">O lançamento não é apagado: fica marcado como cancelado, sai dos totais e o motivo fica registrado no histórico.</p>
+  <div class="fld req"><label for="cn-motivo">Motivo</label><input id="cn-motivo" maxlength="300" placeholder="Ex.: lançado em duplicidade"></div>
+  <div class="erro" id="cn-erro"></div>
+  <div class="row" style="justify-content:flex-end"><button class="btn" id="cn-voltar" type="button">Voltar</button><button class="btn danger" id="cn-ok" type="button">Cancelar lançamento</button></div>
+</div></dialog>
+
+<dialog id="dlgComp" class="largo"><div class="card">
+  <div class="row" style="justify-content:space-between"><h2 style="margin:0">Comprovante</h2><button class="btn sm" id="cp-fechar" type="button">Fechar</button></div>
+  <div class="visor" id="cp-visor" style="margin-top:12px"></div>
+</div></dialog>
+
+<dialog id="dlgSenha"><div class="card">
+  <h2 id="sp-titulo">Senha provisória</h2>
+  <p class="muted" id="sp-info"></p>
+  <div class="senha-box" id="sp-senha"></div>
+  <p class="muted">Entregue pessoalmente ou por mensagem privada. Ela não será mostrada novamente; no primeiro acesso o usuário cria a própria senha.</p>
+  <div class="row" style="justify-content:flex-end"><button class="btn pri" id="sp-ok" type="button">Entendi</button></div>
+</div></dialog>
+
+<dialog id="dlgMinhaSenha"><div class="card">
+  <h2>Trocar minha senha</h2>
+  <div class="grid" style="grid-template-columns:1fr">
+    <div class="fld"><label for="ms-atual">Senha atual</label><input id="ms-atual" type="password" autocomplete="current-password"></div>
+    <div class="fld"><label for="ms-nova">Nova senha</label><input id="ms-nova" type="password" autocomplete="new-password"></div>
+    <div class="fld"><label for="ms-conf">Confirme</label><input id="ms-conf" type="password" autocomplete="new-password"></div>
+  </div>
+  <div class="erro" id="ms-erro"></div>
+  <div class="row" style="justify-content:flex-end"><button class="btn" id="ms-voltar" type="button">Voltar</button><button class="btn pri" id="ms-ok" type="button">Salvar</button></div>
+</div></dialog>
+
+<div id="barraAtualizacao" hidden><span>Nova versão disponível.</span><button class="btn sm" id="btnAtualizar" type="button">Atualizar agora</button></div>
+<div id="toast" role="status" aria-live="polite"></div>
+<p class="versao" id="versaoApp"></p>
+<noscript><p style="padding:20px">Ative o JavaScript para usar o Controle de Obras.</p></noscript>
+</body>
+</html>
