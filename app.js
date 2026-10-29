@@ -5,7 +5,7 @@
      sem internet, tudo é lançado normalmente e enviado depois.
    ========================================================================= */
 'use strict';
-const VERSAO_APP = '1.3.0 · edição tablet';
+const VERSAO_APP = '1.4.0 · edição tablet';
 const FORMA_PEND = 'A pagar';   // forma de pagamento que deixa o item pendente até a baixa
 
 /* =====================================================================
@@ -102,10 +102,35 @@ function totais(list){
   return t;
 }
 const SITUACAO = {lucro:'Lucro', prejuizo:'Prejuízo', equilibrio:'Equilíbrio'};
+
+/* ---------------------------------------------------------------------
+   Equipe (v1.4): presença diária e pagamento das diárias em "Salário"
+   --------------------------------------------------------------------- */
+const FUNCOES = ['Mestre de obras','Encarregado','Pedreiro','Servente','Carpinteiro','Armador','Eletricista','Encanador','Pintor','Gesseiro',
+  'Operador de máquina','Motorista','Vigia','Ajudante','Outros'];
+const PRES = {'1':{rot:'Presente', curto:'P', cls:'p1'}, '0.5':{rot:'½ dia', curto:'½', cls:'p05'}, '0':{rot:'Falta', curto:'F', cls:'p0'}};
+const valorDia = p => round2((+p.fracao||0) * (+p.diaria||0));
+/** Quantidade, valor e observação do pagamento (mesma regra do servidor). */
+function resumoDiarias(dias){
+  let qtd = 0, total = 0; const vals = new Set();
+  dias.forEach(p=>{ qtd += +p.fracao; total += (+p.fracao)*(+p.diaria); vals.add(+p.diaria); });
+  qtd = Math.round(qtd*10)/10; total = round2(total);
+  const lista = dias.map(p=>fmtData(p.data).slice(0,5) + (+p.fracao===0.5 ? ' (½)' : '')).join(', ');
+  const uma = vals.size === 1;
+  return {qtd: uma ? qtd : 1, vu: uma ? [...vals][0] : total, unidade: uma ? 'dia' : 'vb', total, dias: qtd,
+    obs: ('Folha de diárias: ' + String(qtd).replace('.', ',') + ' dia(s) — ' + lista).slice(0,500)};
+}
+const descFolha = (f, ini, fim) => `Diárias — ${f.nome}${f.funcao?` (${f.funcao})`:''} — ${fmtData(ini).slice(0,5)} a ${fmtData(fim)}`;
+function equipeTotais(obraId){
+  const P = ((S && S.presencas) || []).filter(p=>p.obraId===obraId && +p.fracao>0), ap = P.filter(p=>!p.lancId);
+  return {aPagar: round2(ap.reduce((s,p)=>s+valorDia(p),0)), diasAPagar: ap.reduce((s,p)=>s+(+p.fracao),0), funcAPagar: new Set(ap.map(p=>p.funcId)).size,
+    pago: round2(P.filter(p=>p.lancId).reduce((s,p)=>s+valorDia(p),0)), dias: P.reduce((s,p)=>s+(+p.fracao),0),
+    maisAntigo: ap.reduce((m,p)=>!m||p.data<m?p.data:m,'')};
+}
 const pct = x => (x==null || !isFinite(x)) ? '—' : (x*100).toLocaleString('pt-BR',{maximumFractionDigits:1}) + '%';
 
 /** Contrato, orçamento, prazo e alertas da obra (sempre sobre a obra inteira). */
-function analise(o, t){
+function analise(o, t, eq){
   const a = {alertas:[]}, orc = (o && o.orcamento) || {};
   const alerta = (nivel, texto) => a.alertas.push({nivel, texto});
   a.contrato = +(o && o.contrato) || 0; a.area = +(o && o.area) || 0;
@@ -137,6 +162,7 @@ function analise(o, t){
   if (t.qVencido) alerta('aviso', `${t.qVencido} pagamento(s) vencido(s), somando ${fmtBRL(t.vencido)}.`);
   if (a.diasRestantes!=null && a.diasRestantes < 0) alerta('aviso', `O prazo previsto terminou há ${-a.diasRestantes} dia(s).`);
   if (t.reembolso > 0.004) alerta('info', `Reembolso pendente ao engenheiro: ${fmtBRL(t.reembolso)}.`);
+  if (eq && eq.aPagar > 0.004) alerta('info', `Diárias da equipe ainda não pagas: ${fmtBRL(eq.aPagar)} (${fmtNum(eq.diasAPagar)} dia(s) de ${eq.funcAPagar} funcionário(s), desde ${fmtData(eq.maisAntigo)}). Lance o pagamento na aba Equipe.`);
   if (t.situacao==='lucro' && !a.alertas.some(x=>x.nivel==='crit')) alerta('ok', `Lucro esperado de ${fmtBRL(t.lucro)} (${pct(t.margem)} do valor pago pelo cliente).`);
   return a;
 }
@@ -256,7 +282,7 @@ function abaCustos(nome, titulo, info, itens, modo, periodos){
   }
   return {ws: montarAba(M, cols.map(c=>c.w), merges), ref:`'${nome}'!${J}3`, soma};
 }
-function construirWorkbook(obra, L, agrupamento, periodos){
+function construirWorkbook(obra, L, agrupamento, periodos, eq){
   const wb = XLSX.utils.book_new();
   const gerado = new Date().toLocaleString('pt-BR');
   const info = `Obra: ${obra.nome}${obra.cidade?' — '+obra.cidade:''}  |  Gerado em ${gerado} por ${S.usuario.nome}`;
@@ -268,7 +294,7 @@ function construirWorkbook(obra, L, agrupamento, periodos){
   const mo  = abaSimples('Mão de Obra','MÃO DE OBRA',info,[col('Data','data',11),col('Nº documento','doc',14),col('Beneficiário','forn',24),col('Descrição','desc',34),col('Etapa da obra','etapa',16),...comuns], de('mo'));
   const mat = abaSimples('Material','MATERIAL',info,[col('Data','data',11),col('Nº NF / Recibo','doc',14),col('Fornecedor','forn',24),col('Material','desc',34),col('Etapa da obra','etapa',16),...comuns], de('material'));
   const dia = abaCustos('Custos dia a dia','CUSTOS DIA A DIA',info, de('dia'), agrupamento||'semana', periodos);
-  const sal = abaSimples('Salário','SALÁRIO DO ENGENHEIRO',info,[col('Data','data',11),col('Nº documento','doc',14),col('Origem','forn',22),col('Descrição','desc',34),...comuns], de('salario'));
+  const sal = abaSimples('Salário','SALÁRIO — ENGENHEIRO E DIÁRIAS DA EQUIPE',info,[col('Data','data',11),col('Nº documento','doc',14),col('Beneficiário / origem','forn',24),col('Descrição','desc',40),...comuns], de('salario'));
   // "A pagar": tudo que foi lançado para pagar depois — pago ou pendente. Colunas C (categoria), J (total) e K (situação) são usadas nas fórmulas.
   const prev = L.filter(ehPrevistoAPagar).sort((x,y)=>(x.venc||x.data||'').localeCompare(y.venc||y.data||''));
   const pag = abaSimples('A pagar','VALORES A PAGAR (PREVISTOS) — PAGOS E PENDENTES',info,[col('Data','data',11),col('Vencimento','venc',11),col('Categoria atual','catNome',18),
@@ -366,10 +392,46 @@ function construirWorkbook(obra, L, agrupamento, periodos){
     [cT('Lucro esperado = Valor pago pelo cliente − Custo total. Lançamentos cancelados não entram no relatório.',XS.info)]);
   if (rCTi !== rIniCT) throw new Error('Início: linha do custo total fora do lugar');
   const inicio = montarAba(IM,[40,22,40],[{s:{r:0,c:0},e:{r:0,c:2}}]);
-  [['Início',inicio],['Resultado',resultado],['Recebido do cliente',cli.ws],['Valor enviado',env.ws],['Mão de Obra',mo.ws],['Material',mat.ws],
-   ['Custos dia a dia',dia.ws],['Salário',sal.ws],['A pagar',pag.ws],['Reembolso',reemb]]
-    .forEach(([n,ws])=>XLSX.utils.book_append_sheet(wb, ws, n));
+  const abas = [['Início',inicio],['Resultado',resultado],['Recebido do cliente',cli.ws],['Valor enviado',env.ws],['Mão de Obra',mo.ws],['Material',mat.ws],
+   ['Custos dia a dia',dia.ws],['Salário',sal.ws]];
+  if (eq && eq.func.length) abas.push(['Equipe', abaEquipe(info, eq, L)]);
+  abas.push(['A pagar',pag.ws],['Reembolso',reemb]);
+  abas.forEach(([n,ws])=>XLSX.utils.book_append_sheet(wb, ws, n));
   return wb;
+}
+
+/** Aba "Equipe": resumo por funcionário + registro diário de presença (valor = fração × diária). */
+function abaEquipe(info, eq, L){
+  const stLanc = new Map(L.filter(l=>!l.cancelado).map(l=>[l.id, l.status]));
+  const pago = p => p.lancId && stLanc.has(p.lancId);
+  const sitDia = p => !pago(p) ? 'A pagar' : stLanc.get(p.lancId)==='Pendente' ? 'Lançado (pagamento pendente)' : 'Pago';
+  const nomeF = id => (eq.func.find(f=>f.id===id)||{}).nome || '';
+  const funcF = id => (eq.func.find(f=>f.id===id)||{}).funcao || '';
+  const M = [[cT('EQUIPE E PRESENÇA DIÁRIA',XS.title)], [cT(info,XS.info)], [],
+    ['Funcionário','Função','Diária atual (R$)','Dias trabalhados','Valor trabalhado (R$)','Lançado em Salário (R$)','A pagar (R$)','PIX','Telefone','Situação'].map(h=>cT(h,XS.head))];
+  const f0 = M.length + 1;
+  eq.func.slice().sort((a,b)=>a.nome.localeCompare(b.nome,'pt-BR')).forEach(f=>{
+    const P = eq.pres.filter(p=>p.funcId===f.id && +p.fracao>0);
+    const vt = round2(P.reduce((s,p)=>s+valorDia(p),0)), vp = round2(P.filter(pago).reduce((s,p)=>s+valorDia(p),0)), r = M.length + 1;
+    M.push([cT(f.nome,XS.lbl), cT(f.funcao||''), cM(f.diaria), cN(P.reduce((s,p)=>s+(+p.fracao),0)), cM(vt), cM(vp), cF(`E${r}-F${r}`, vt-vp), cT(f.pix||''), cT(f.telefone||''), cT(f.ativo===false?'Inativo':'Ativo')]);
+  });
+  const f1 = M.length, rt = M.length + 1;
+  const tot = c => eq.func.length ? cF(`SUM(${c}${f0}:${c}${f1})`, 0, XS.totVal) : cM(0, XS.totVal);
+  const tr = [cT('TOTAL',XS.totLbl), cT('',XS.totLbl), cT('',XS.totLbl), {t:'n', f:`SUM(D${f0}:D${f1})`, v:0, s:XS.totVal}, tot('E'), tot('F'), tot('G')];
+  M.push(tr);
+  M.push([], [cT('REGISTRO DE PRESENÇA (P = presente, ½ = meio dia, F = falta)',XS.bloco)],
+    ['Data','Funcionário','Função','Presença','Fração do dia','Diária (R$)','Valor (R$)','Situação','Observação'].map(h=>cT(h,XS.head)));
+  const p0 = M.length + 1;
+  const reg = eq.pres.slice().sort((a,b)=>a.data.localeCompare(b.data) || nomeF(a.funcId).localeCompare(nomeF(b.funcId),'pt-BR'));
+  reg.forEach(p=>{ const r = M.length + 1;
+    M.push([cD(p.data), cT(nomeF(p.funcId)), cT(funcF(p.funcId)), cT((PRES[String(+p.fracao)]||{}).rot||''), {t:'n', v:+p.fracao, s:XS.num}, cM(p.diaria),
+      cF(`E${r}*F${r}`, valorDia(p)), cT(+p.fracao>0 ? sitDia(p) : '—'), cT(p.obs||'')]); });
+  // valores em cache dos totais do resumo
+  const somaCol = i => round2(M.slice(f0-1, f1).reduce((s,row)=>s+(+(row[i]&&row[i].v)||0),0));
+  tr[3].v = somaCol(3); tr[4].v = somaCol(4); tr[5].v = somaCol(5); tr[6].v = somaCol(6);
+  const ws = montarAba(M,[26,18,14,12,16,14,14,22,16,10],[{s:{r:0,c:0},e:{r:0,c:9}},{s:{r:1,c:0},e:{r:1,c:9}}]);
+  if (reg.length) ws['!autofilter'] = {ref:`A${p0-1}:I${M.length}`};
+  return ws;
 }
 
 /* =====================================================================
@@ -416,6 +478,7 @@ async function api(acao, dados, semToken){
 
 function reconstruir(){
   S = BASE ? clone(BASE) : {usuario:SESSAO.usuario, cfg:{formas:['PIX'],unidades:['vb'],subcats:['Outros'],etapas:[]}, obras:[], lanc:[], periodos:[], nomes:{}};
+  S.func = S.func || []; S.presencas = S.presencas || [];
   S.usuario = SESSAO.usuario;
   for (const op of FILA) aplicarLocal(op);
 }
@@ -438,7 +501,8 @@ function aplicarLocal(op){
       if (l) Object.assign(l, rec);
       else S.lanc.push({...rec, comprovanteId:'', criadoPor:S.usuario.id, criadoEm:new Date(op.criadoEm).toISOString(), cancelado:false, motivoCancel:''});
       break; }
-    case 'lanc.cancelar': { const l = achar(S.lanc, d.id); if (l) Object.assign(l, {cancelado:true, motivoCancel:d.motivo, _pend:true}); break; }
+    case 'lanc.cancelar': { const l = achar(S.lanc, d.id); if (l) Object.assign(l, {cancelado:true, motivoCancel:d.motivo, _pend:true});
+      if (l && l.categoria==='salario') S.presencas.forEach(p=>{ if (p.lancId===l.id){ p.lancId=''; p._pend=true; } }); break; }
     case 'lanc.pagar': { const l = achar(S.lanc, d.id);
       if (l && l.categoria!=='apagar' && l.forma===FORMA_PEND && l.status==='Pendente'){
         const nota = `Pago em ${fmtData(d.data)} via ${d.forma} (previsto para ${fmtData(l.venc)})`;
@@ -449,6 +513,32 @@ function aplicarLocal(op){
     case 'periodo.salvar': { const p = achar(S.periodos, d.id); if (p) Object.assign(p, d); else S.periodos.push({...d}); break; }
     case 'periodo.excluir': S.periodos = S.periodos.filter(p=>p.id!==d.id); break;
     case 'comprovante.enviar': { const l = achar(S.lanc, d.lancId); if (l){ l._compPend = op.opId; l._pend = true; } break; }
+    case 'func.salvar': {
+      const campos = {nome:d.nome, funcao:d.funcao||'', diaria:round2(d.diaria), pix:d.pix||'', telefone:d.telefone||'', ativo:d.ativo!==false, _pend:true};
+      const f = achar(S.func, d.id);
+      if (f) Object.assign(f, campos); else S.func.push({id:d.id, obraId:d.obraId, ...campos, criadoEm:new Date(op.criadoEm).toISOString()});
+      break; }
+    case 'presenca.salvar': {
+      for (const it of d.itens||[]){
+        const f = achar(S.func, it.funcId); if (!f) continue;
+        const fr = +it.fracao, p = S.presencas.find(x=>x.obraId===d.obraId && x.funcId===it.funcId && x.data===d.data);
+        if (p){ if (p.lancId) continue; Object.assign(p, {fracao:fr, obs:it.obs||'', diaria: fr ? (+p.diaria||f.diaria) : f.diaria, _pend:true}); }
+        else S.presencas.push({id:'tmp-'+op.opId+'-'+it.funcId, obraId:d.obraId, funcId:it.funcId, data:d.data, fracao:fr, diaria:f.diaria, obs:it.obs||'', lancId:'', _pend:true});
+      }
+      break; }
+    case 'folha.gerar': {
+      for (const it of d.itens||[]){
+        if (achar(S.lanc, it.lancId)) continue;
+        const f = achar(S.func, it.funcId); if (!f) continue;
+        const dias = S.presencas.filter(p=>p.obraId===d.obraId && p.funcId===f.id && !p.lancId && +p.fracao>0 && p.data>=d.ini && p.data<=d.fim).sort((a,b)=>a.data.localeCompare(b.data));
+        if (!dias.length) continue;
+        const r = resumoDiarias(dias), pend = d.forma===FORMA_PEND;
+        S.lanc.push({id:it.lancId, obraId:d.obraId, categoria:'salario', data:d.data, descricao:descFolha(f, d.ini, d.fim), forma:d.forma, unidade:r.unidade, qtd:r.qtd, vu:round2(r.vu),
+          total:round2(r.qtd*round2(r.vu)), subcat:'', tipo:'', venc:pend?d.venc:'', status:pend?'Pendente':'Pago', fornecedor:f.nome, doc:'', etapa:'', mesRef:mesRefDe(d.data), obs:r.obs,
+          comprovanteId:'', criadoPor:S.usuario.id, criadoEm:new Date(op.criadoEm).toISOString(), alteradoPor:'', alteradoEm:'', cancelado:false, motivoCancel:'', _pend:true});
+        dias.forEach(p=>{ p.lancId = it.lancId; p._pend = true; });
+      }
+      break; }
     default: break;
   }
 }
@@ -487,7 +577,7 @@ async function sincronizar(manual){
     }
     FILA = FILA.filter(op=>!resp.has(op.opId));
     await kv.set('fila', FILA);
-    BASE = {api:r.api||1, usuario:r.usuario, cfg:r.cfg, obras:r.obras, lanc:r.lanc, periodos:r.periodos, nomes:r.nomes||{}};
+    BASE = {api:r.api||1, usuario:r.usuario, cfg:r.cfg, obras:r.obras, lanc:r.lanc, periodos:r.periodos, func:r.func||[], presencas:r.presencas||[], nomes:r.nomes||{}};
     SESSAO.usuario = r.usuario; await kv.set('sessao', SESSAO);
     await kv.set('cache', BASE);
     ultimoErroSync = ''; ultimoSyncOk = Date.now();
@@ -507,7 +597,8 @@ async function sincronizar(manual){
 function resumoOp(op){
   const d = op.dados||{};
   const nomes = {'obra.salvar':'Obra', 'obra.arquivar':'Arquivar obra', 'lanc.salvar':'Lançamento', 'lanc.cancelar':'Cancelamento', 'lanc.pagar':'Pagamento',
-    'periodo.salvar':'Período', 'periodo.excluir':'Excluir período', 'comprovante.enviar':'Comprovante', 'relatorio.salvar':'Relatório no Drive'};
+    'periodo.salvar':'Período', 'periodo.excluir':'Excluir período', 'comprovante.enviar':'Comprovante', 'relatorio.salvar':'Relatório no Drive',
+    'func.salvar':'Funcionário', 'presenca.salvar':'Chamada de '+fmtData(d.data), 'folha.gerar':'Pagamento de diárias'};
   const l = S && S.lanc.find(x=>x.id===(d.id||d.lancId));
   const desc = d.descricao || d.nome || (l && l.descricao) || '';
   const val = d.qtd && d.vu ? ' — ' + fmtBRL(d.qtd*d.vu) : '';
@@ -558,15 +649,16 @@ const podeEditar = l => !l.cancelado && (ehAdmin() || l.criadoPor===S.usuario.id
 
 /* ---------- tema ---------- */
 function aplicarTema(){
-  const t = PREFS.tema||'auto', r = document.documentElement;
-  if (t==='claro') r.dataset.theme='light'; else if (t==='escuro') r.dataset.theme='dark'; else delete r.dataset.theme;
+  const t = PREFS.tema||'escuro', r = document.documentElement;
+  r.dataset.theme = t==='claro' ? 'light' : t==='auto' ? 'auto' : 'dark';
+  const mt = document.querySelector('meta[name=theme-color]'); if (mt) mt.content = getComputedStyle(r).getPropertyValue('--bg').trim() || '#0b0d22';
   document.querySelectorAll('.btnTema').forEach(b=>b.textContent = t==='claro' ? '☀️ Claro' : t==='escuro' ? '🌙 Escuro' : '🖥️ Auto');
   document.querySelectorAll('.btnTema').forEach(b=>b.title='Tema: toque para alternar entre claro, escuro e automático');
 }
 function alternarTema(){
   const ord = ['claro','escuro','auto'];
-  PREFS.tema = ord[(ord.indexOf(PREFS.tema||'auto')+1)%3]; salvarPrefs(); aplicarTema();
-  if (obraAtualId()) renderResumo();
+  PREFS.tema = ord[(ord.indexOf(PREFS.tema||'escuro')+1)%3]; salvarPrefs(); aplicarTema();
+  if (S && obraAtualId()) renderResumo();
 }
 
 /* ---------- navegação ---------- */
@@ -587,7 +679,7 @@ function rotear(soAtualizar){
   const id = obraAtualId();
   if (h==='#/admin' && ehAdmin()){
     mostrarView('admin');
-    if (viewAnterior!=='admin') carregarUsuarios();
+    if (viewAnterior!=='admin'){ abrirAbaAdmin(abaAdmin); carregarObrasAdmin(); carregarUsuarios(); }
     viewAnterior = 'admin'; return;
   }
   if (h==='#/admin') history.replaceState(null,'','#/');
@@ -595,7 +687,8 @@ function rotear(soAtualizar){
     mostrarView('obra');
     if (!soAtualizar || obraAnterior!==id){
       listaCat='todas'; ['r-ini','r-fim','l-ini','l-fim','l-txt','l-sit','l-etapa'].forEach(x=>$(x).value=''); $('histBody').innerHTML='';
-      renderListas(); limparForm(false); abrirTab('lancar'); window.scrollTo(0,0); preencherDadosObra();
+      chamada = {data:hojeIso(), marcas:{}}; folhaSel = {}; funcEditando = null; ['fo-ini','fo-fim','fo-data','mp-mes'].forEach(x=>$(x).value='');
+      renderListas(); limparForm(false); abrirTab('lancar'); window.scrollTo(0,0); preencherDadosObra(); limparFunc();
     }
     obraAnterior = id; viewAnterior = 'obra';
     document.title = `${obraAtual().nome} — Controle de Obras`;
@@ -695,7 +788,7 @@ function renderHome(){
   $('obrasGrid').className = obras.length ? 'obras-grid' : '';
   $('obrasGrid').innerHTML = obras.length ? obras.map(o=>{
     const L = S.lanc.filter(l=>l.obraId===o.id && !l.cancelado), t = totais(L), ult = L.reduce((m,l)=>l.data>m?l.data:m,'');
-    const pend = L.filter(ehPendente), an = analise(o, t), crit = an.alertas.filter(x=>x.nivel==='crit');
+    const pend = L.filter(ehPendente), eq = equipeTotais(o.id), an = analise(o, t, eq), crit = an.alertas.filter(x=>x.nivel==='crit');
     const sub = [o.cidade, o.prop && 'Prop.: '+o.prop, o.ini && 'Início: '+fmtData(o.ini)].filter(Boolean).map(esc).join(' · ');
     return `<div class="obra-card">
       <div><h3>${esc(o.nome)} ${o._pend?'<span class="tag">⏳ não enviada</span>':''}</h3><div class="muted">${sub || 'Sem dados complementares'}</div></div>
@@ -707,6 +800,7 @@ function renderHome(){
       </div>
       ${crit.length ? `<div class="alerta alerta-crit">⚠ ${esc(crit[0].texto)}</div>` : ''}
       ${pend.length ? `<div class="aviso">⏰ ${pend.length} pagamento(s) pendente(s): ${fmtBRL(t.pend)}${t.proxVenc?` · próximo ${fmtData(t.proxVenc).slice(0,5)}`:''}</div>` : ''}
+      ${eq.aPagar ? `<div class="aviso info">👷 Diárias da equipe a pagar: ${fmtBRL(eq.aPagar)} (${fmtNum(eq.diasAPagar)} dia(s))</div>` : ''}
       <div class="row"><button class="btn pri" data-open="${o.id}" type="button">Abrir obra →</button>
         <a class="btn" href="#/obra/${o.id}" target="_blank" rel="noopener" title="Abrir em outra aba">↗ Nova aba</a></div></div>`;
   }).join('') : `<div class="vazio"><b>Nenhuma obra disponível.</b><br>${ehProp() ? 'Peça ao administrador para liberar o acesso à sua obra.' : 'Cadastre a primeira obra abaixo.'}</div>`;
@@ -738,7 +832,7 @@ function renderObra(){
   const o = obraAtual(); if (!o) return;
   $('obraTitulo').textContent = o.nome;
   $('obraSub').textContent = [o.cidade, o.prop && 'Prop.: '+o.prop, `${S.usuario.nome} (${PERFIL_NOME[perfil()]})`].filter(Boolean).join(' · ');
-  renderListas(); renderMini(); renderResumo(); renderLista(); renderDadosObra();
+  renderListas(); renderMini(); renderResumo(); renderLista(); renderDadosObra(); renderEquipe();
 }
 function renderListas(){
   const catAtual = $('f-cat').value || (ehProp() ? 'enviado' : 'dia');
@@ -935,20 +1029,21 @@ function kpisFull(t){
       <div class="s">Já pago <b>${fmtBRL(t.pagoAPagar)}</b> · pendente <b>${fmtBRL(t.pend)}</b>${t.proxVenc?` · próximo ${fmtData(t.proxVenc)}`:''}</div>
       ${t.prevAPagar>0?`<div class="barra-mini" title="Já pago ${pct(t.pagoAPagar/t.prevAPagar)}"><i style="width:${Math.min(100,t.pagoAPagar/t.prevAPagar*100)}%"></i></div>`:''}</div>` +
     kpiHTML(CATS.enviado.nome, t.enviado, CATS.enviado.cor, t.reembRec ? `inclui ${fmtBRL(t.reembRec)} de reembolso · não é custo` : 'caixa do engenheiro · não é custo') +
-    kpiHTML('Reembolso', Math.abs(t.reembolso), '#607d8b', interpretaReemb(t.reembolso));
+    kpiHTML('Reembolso', Math.abs(t.reembolso), '#94a3b8', interpretaReemb(t.reembolso)) +
+    (S.func.some(f=>f.obraId===obraAtualId()) ? (eq=>kpiHTML('Diárias da equipe a pagar', eq.aPagar, CATS.salario.cor, eq.aPagar ? `${fmtNum(eq.diasAPagar)} dia(s) trabalhados ainda sem pagamento` : 'nenhuma diária pendente'))(equipeTotais(obraAtualId())) : '');
 }
 function tileLucro(t, extra){
   return `<div class="kpi lucro lucro-${t.situacao} ${extra||''}"><div class="l">Lucro esperado ${chipSit(t.situacao)}</div><div class="v">${fmtBRL(t.lucro)}</div>
     <div class="s">${t.cliente>0 ? `Margem de ${pct(t.margem)} sobre o valor pago pelo cliente` : 'Lance o valor pago pelo cliente para calcular a margem'}</div></div>`;
 }
 function renderMini(){
-  const L = ativos(), t = totais(L), pend = lancObra().filter(l=>l._pend).length, an = analise(obraAtual(), t);
+  const L = ativos(), t = totais(L), pend = lancObra().filter(l=>l._pend).length, an = analise(obraAtual(), t, equipeTotais(obraAtualId()));
   const al = an.alertas.find(x=>x.nivel==='crit') || an.alertas.find(x=>x.nivel==='aviso');
   $('miniKpis').innerHTML = tileLucro(t, 'span2') +
     kpiHTML('Pago pelo cliente', t.cliente, CATS.cliente.cor, `${t.qCliente} recebimento(s)`) +
-    kpiHTML('Custo total da obra', t.custoTotal, '#1f4e78', `${L.length} lançamento(s)${pend?` · ${pend} a enviar`:''}`) +
+    kpiHTML('Custo total da obra', t.custoTotal, '#6366f1', `${L.length} lançamento(s)${pend?` · ${pend} a enviar`:''}`) +
     kpiHTML('Valor a pagar pendente', t.pend, CATS.apagar.cor, t.qPend ? `${t.qPend} item(ns) · próximo ${fmtData(t.proxVenc)}` : 'nada pendente') +
-    kpiHTML('Reembolso', Math.abs(t.reembolso), '#607d8b', interpretaReemb(t.reembolso)) +
+    kpiHTML('Reembolso', Math.abs(t.reembolso), '#94a3b8', interpretaReemb(t.reembolso)) +
     (al ? `<button class="alerta alerta-${al.nivel} span2" type="button" data-irtab="resumo">${al.nivel==='crit'?'⚠':'!'} ${esc(al.texto)} <u>Ver resumo</u></button>` : '');
   const ult = lancObra().slice().sort((a,b)=>String(b.criadoEm||'').localeCompare(String(a.criadoEm||''))).slice(0,6);
   $('ultimos').innerHTML = ult.length ? ult.map(l=>`<tr class="${l.cancelado?'cancel':''}"><td title="${fmtData(l.data)}">${fmtData(l.data).slice(0,5)}</td><td>${badge(l.categoria)}</td><td>${esc(l.descricao)} ${l._pend?'<span class="tag">⏳</span>':''}</td><td class="n">${fmtBRL(l.total)}</td>
@@ -964,16 +1059,16 @@ function renderResumo(){
   const ini=$('r-ini').value, fim=$('r-fim').value, filtrado = !!(ini||fim);
   const obra = obraAtual(), todos = ativos();
   const L = todos.filter(l => (!ini || l.data>=ini) && (!fim || l.data<=fim)), t = totais(L);
-  const tObra = filtrado ? totais(todos) : t, an = analise(obra, tObra);
+  const tObra = filtrado ? totais(todos) : t, an = analise(obra, tObra, equipeTotais(obra.id));
   $('r-nota').textContent = filtrado ? 'Valores do período escolhido. Contrato, orçamento, prazo e alertas consideram a obra inteira.' : '';
   // alertas
   $('alertas').innerHTML = an.alertas.map(x=>`<div class="alerta alerta-${x.nivel}" role="${x.nivel==='crit'?'alert':'status'}">${{crit:'⚠',aviso:'!',info:'i',ok:'✓'}[x.nivel]} ${esc(x.texto)}</div>`).join('');
   // painel de resultado
   $('painelRes').innerHTML =
     kpiHTML('Valor pago pelo cliente', t.cliente, CATS.cliente.cor, an.contrato>0 && !filtrado ? `${pct(an.pctRecebido)} do contrato de ${fmtBRL(an.contrato)}` : `${t.qCliente} recebimento(s)`) +
-    kpiHTML('Custo total da obra', t.custoTotal, '#1f4e78', `${fmtBRL(t.custoLancado)} lançados + ${fmtBRL(t.apagar)} a pagar sem categoria`) +
+    kpiHTML('Custo total da obra', t.custoTotal, '#6366f1', `${fmtBRL(t.custoLancado)} lançados + ${fmtBRL(t.apagar)} a pagar sem categoria`) +
     tileLucro(t) +
-    `<div class="kpi" style="--c:#455a64"><div class="l">Resultado atual</div><div class="v ${t.resultadoAtual<-0.004?'neg':''}">${fmtBRL(t.resultadoAtual)}</div>
+    `<div class="kpi" style="--c:#64748b"><div class="l">Resultado atual</div><div class="v ${t.resultadoAtual<-0.004?'neg':''}">${fmtBRL(t.resultadoAtual)}</div>
       <div class="s">Pago pelo cliente − custos lançados (sem os valores a pagar)</div></div>`;
   // demonstrativo
   const linhaD = (sinal, rot, v, cls, extra) => `<tr class="${cls||''}"><td class="sinal">${sinal}</td><td>${rot}</td><td class="n">${fmtBRL(v)}</td><td class="n muted">${extra??''}</td></tr>`;
@@ -1024,7 +1119,7 @@ function renderResumo(){
     : `<tr><td colspan="5" class="muted">Nenhum pagamento pendente.</td></tr>`;
   if (typeof Chart === 'undefined' || !$('tab-resumo').classList.contains('on')) return;
   const css = getComputedStyle(document.documentElement), cv = n => css.getPropertyValue(n).trim();
-  const cTxt = cv('--txt'), cBd = cv('--bd'), cCard = cv('--card');
+  const cTxt = cv('--txt'), cBd = cv('--bd'), cCard = cv('--dlg');
   Chart.defaults.color = cTxt; Chart.defaults.borderColor = cBd;
   const eixoR$ = {ticks:{color:cTxt, callback:v=>'R$ '+(+v).toLocaleString('pt-BR',{notation:'compact'})}, grid:{color:cBd}};
   const graf = (id, vazioId, tem, cfg) => { $(vazioId).hidden = tem; $(id).parentElement.hidden = !tem; charts[id] && charts[id].destroy(); charts[id] = tem ? new Chart($(id), cfg) : null; };
@@ -1048,14 +1143,14 @@ function renderResumo(){
   const et = {}; L.filter(l=>CAT_TOTAL.includes(l.categoria)).forEach(l=>{ const e = l.etapa||'Sem etapa'; et[e] = (et[e]||0) + l.total; });
   const ek = Object.keys(et).sort((a,b)=>et[b]-et[a]);
   graf('chEtapa', 'etapaVazio', ek.length>0, {type:'bar',
-    data:{labels:ek, datasets:[{data:ek.map(k=>round2(et[k])), backgroundColor:'#1f4e78', borderRadius:4}]},
+    data:{labels:ek, datasets:[{data:ek.map(k=>round2(et[k])), backgroundColor:'#6366f1', borderRadius:6}]},
     options:{animation:false, indexAxis:'y', maintainAspectRatio:false, plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>`${fmtBRL(c.raw)} (${pct(c.raw/t.custoTotal)})`}}},
       scales:{x:eixoR$, y:{ticks:{color:cTxt}, grid:{color:cBd}}}}});
   // custos dia a dia por subcategoria
   const subs = {}; L.filter(l=>l.categoria==='dia').forEach(l=>{ const s=l.subcat||'Outros'; subs[s]=(subs[s]||0)+l.total; });
   const sk = Object.keys(subs).sort((a,b)=>subs[b]-subs[a]);
   graf('chSub', 'subVazio', sk.length>0, {type:'bar',
-    data:{labels:sk, datasets:[{data:sk.map(k=>round2(subs[k])), backgroundColor:CATS.dia.cor, borderRadius:4}]},
+    data:{labels:sk, datasets:[{data:sk.map(k=>round2(subs[k])), backgroundColor:CATS.dia.cor, borderRadius:6}]},
     options:{animation:false, indexAxis:'y', maintainAspectRatio:false, plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>fmtBRL(c.raw)}}},
       scales:{x:eixoR$, y:{ticks:{color:cTxt}, grid:{color:cBd}}}}});
 }
@@ -1174,6 +1269,196 @@ function renderDadosObra(){
     : `<tr><td class="muted">Nenhum período cadastrado.</td></tr>`;
 }
 
+/* ---------- equipe: chamada diária, mapa de presença, pagamento e cadastro ---------- */
+const funcObra = todos => S.func.filter(f=>f.obraId===obraAtualId() && (todos || f.ativo!==false)).sort((a,b)=>a.nome.localeCompare(b.nome,'pt-BR'));
+const presObra = () => S.presencas.filter(p=>p.obraId===obraAtualId());
+const iniciais = n => String(n||'?').trim().split(/\s+/).filter(Boolean).slice(0,2).map(x=>x[0]).join('').toUpperCase();
+const podeEquipe = () => !ehProp();
+let chamada = {data:'', marcas:{}}, funcEditando = null;
+function exigeApi4(elErro){
+  if (BASE && (BASE.api||1) < 4){ const m = 'O servidor ainda não guarda a equipe. O administrador precisa concluir a Parte 1 da atualização (Google).'; if (elErro) elErro.textContent = m; else toast(m); return false; }
+  return true;
+}
+function presencaSalva(funcId, data){ return S.presencas.find(p=>p.obraId===obraAtualId() && p.funcId===funcId && p.data===data); }
+function marcaAtual(funcId){
+  if (funcId in chamada.marcas) return chamada.marcas[funcId];
+  const p = presencaSalva(funcId, chamada.data); return p ? +p.fracao : null;
+}
+const chamadaSuja = () => Object.keys(chamada.marcas).length > 0;
+function trocarDiaChamada(iso){
+  if (!iso) return;
+  if (chamadaSuja() && iso !== chamada.data && !confirm('Há marcações não salvas neste dia. Descartar?')){ $('eq-data').value = chamada.data; return; }
+  chamada = {data:iso, marcas:{}}; renderEquipe();
+}
+function renderEquipe(){
+  if (!obraAtualId()) return;
+  if (!chamada.data) chamada.data = hojeIso();
+  $('eq-data').value = chamada.data;
+  const F = funcObra(false), FT = funcObra(true), pode = podeEquipe();
+  ['eq-acoes','cardFolha','fu-form','fu-acoes'].forEach(id=>$(id).hidden = !pode);
+  $('fu-titulo').textContent = pode ? (funcEditando ? 'Editar funcionário' : 'Cadastrar funcionário') : 'Funcionários da obra';
+  // chamada
+  const dow = isoToDate(chamada.data).toLocaleDateString('pt-BR',{weekday:'long'});
+  let pres = 0, meio = 0, falta = 0, custo = 0, semMarca = 0;
+  $('eq-lista').innerHTML = F.length ? F.map(f=>{
+    const m = marcaAtual(f.id), salvo = presencaSalva(f.id, chamada.data), pago = salvo && salvo.lancId;
+    const diaria = salvo && +salvo.fracao ? +salvo.diaria : f.diaria;
+    if (m===1) pres++; else if (m===0.5) meio++; else if (m===0) falta++; else semMarca++;
+    if (m) custo += m*diaria;
+    const bt = (v, rot) => `<button type="button" class="${PRES[String(v)].cls} ${m===v?'on':''}" data-pres="${v}" data-func="${f.id}" aria-pressed="${m===v}" ${pago||!pode?'disabled':''}>${rot}</button>`;
+    return `<div class="eq-item ${f.id in chamada.marcas?'mudou':''}">
+      <div class="eq-nome"><span class="avatar">${esc(iniciais(f.nome))}</span><div><b>${esc(f.nome)}</b><small>${esc(f.funcao||'Sem função')} · ${fmtBRL(diaria)}/dia${pago?' · <span class="tag ok">pago</span>':''}${salvo&&salvo._pend?' <span class="tag">⏳</span>':''}</small></div></div>
+      <div class="seg" role="group" aria-label="Presença de ${esc(f.nome)}">${bt(1,'Presente')}${bt(0.5,'½ dia')}${bt(0,'Falta')}</div></div>`;
+  }).join('') : `<div class="vazio-mini"><p><b>Nenhum funcionário ativo nesta obra.</b> ${pode?'Cadastre a equipe no quadro "Cadastrar funcionário", logo abaixo.':''}</p></div>`;
+  $('eq-resumoDia').innerHTML = F.length ? `<span class="dia-sem">${esc(dow)}</span>
+    <span class="pill p1">${pres} presente(s)</span>${meio?`<span class="pill p05">${meio} meio dia</span>`:''}${falta?`<span class="pill p0">${falta} falta(s)</span>`:''}${semMarca?`<span class="pill">${semMarca} sem marcação</span>`:''}
+    <span class="pill custo">Custo do dia ${fmtBRL(custo)}</span>` : '';
+  $('eq-status').textContent = chamadaSuja() ? `${Object.keys(chamada.marcas).length} alteração(ões) não salva(s)` : '';
+  $('eq-salvar').disabled = !chamadaSuja();
+  // indicadores
+  const eq = equipeTotais(obraAtualId()), hoje = hojeIso();
+  const presHoje = S.presencas.filter(p=>p.obraId===obraAtualId() && p.data===hoje && +p.fracao>0).length;
+  $('eq-kpis').innerHTML = kpiHTML('Diárias a pagar', eq.aPagar, CATS.apagar.cor, eq.aPagar ? `${fmtNum(eq.diasAPagar)} dia(s) · ${eq.funcAPagar} funcionário(s) · desde ${fmtData(eq.maisAntigo).slice(0,5)}` : 'tudo pago') +
+    kpiHTML('Diárias já lançadas em Salário', eq.pago, CATS.salario.cor, `${fmtNum(eq.dias)} dia(s) trabalhados no total`) +
+    `<div class="kpi" style="--c:#8b5cf6"><div class="l">Equipe</div><div class="v">${F.length} ativo(s)</div><div class="s">${presHoje} presente(s) hoje${FT.length>F.length?` · ${FT.length-F.length} inativo(s)`:''}</div></div>`;
+  renderFolha(); renderMapa(); renderFuncs();
+}
+function marcar(funcId, v){
+  const salvo = presencaSalva(funcId, chamada.data);
+  if (salvo && +salvo.fracao===v) delete chamada.marcas[funcId]; else chamada.marcas[funcId] = v;
+  renderEquipe();
+}
+function todosPresentes(){
+  funcObra(false).forEach(f=>{ const m = marcaAtual(f.id), s = presencaSalva(f.id, chamada.data); if (m==null && !(s && s.lancId)) chamada.marcas[f.id] = 1; });
+  renderEquipe();
+}
+async function salvarChamada(){
+  if (!exigeApi4($('eq-erro'))) return;
+  const itens = Object.entries(chamada.marcas).map(([funcId, fracao])=>({funcId, fracao}));
+  if (!itens.length) return;
+  $('eq-erro').textContent = '';
+  await enfileirar('presenca.salvar', {obraId:obraAtualId(), data:chamada.data, itens});
+  const n = itens.filter(i=>i.fracao>0).length;
+  chamada.marcas = {}; renderObra(); toast(`Chamada de ${fmtData(chamada.data)} salva — ${n} com presença` + (navigator.onLine ? '' : ' (será enviada quando houver internet)')); sincronizar();
+}
+/* pagamento das diárias */
+function diasAPagar(funcId, ini, fim){
+  return presObra().filter(p=>p.funcId===funcId && !p.lancId && +p.fracao>0 && (!ini || p.data>=ini) && (!fim || p.data<=fim)).sort((a,b)=>a.data.localeCompare(b.data));
+}
+let folhaSel = {};
+function renderFolha(){
+  if (!$('fo-ini').value){ const eq = equipeTotais(obraAtualId()); $('fo-ini').value = eq.maisAntigo || hojeIso().slice(0,8)+'01'; }
+  if (!$('fo-fim').value) $('fo-fim').value = hojeIso();
+  if (!$('fo-data').value) $('fo-data').value = hojeIso();
+  fillSelect($('fo-forma'), S.cfg.formas);
+  $('fo-vencWrap').hidden = $('fo-forma').value !== FORMA_PEND;
+  const ini = $('fo-ini').value, fim = $('fo-fim').value;
+  const linhas = funcObra(true).map(f=>({f, dias:diasAPagar(f.id, ini, fim)})).filter(x=>x.dias.length);
+  let tot = 0, qd = 0;
+  $('fo-lista').innerHTML = linhas.length ? linhas.map(({f, dias})=>{
+    const r = resumoDiarias(dias), on = folhaSel[f.id] !== false;
+    if (on){ tot += r.total; qd += r.dias; }
+    return `<tr><td><input type="checkbox" data-folha="${f.id}" ${on?'checked':''} aria-label="Pagar ${esc(f.nome)}"></td><td><b>${esc(f.nome)}</b><br><small class="muted">${esc(f.funcao||'')}</small></td>
+      <td class="n">${fmtNum(r.dias)}</td><td class="wrap muted">${esc(dias.map(p=>fmtData(p.data).slice(0,5)+(+p.fracao===0.5?'½':'')).join(' · '))}</td>
+      <td class="n"><b>${fmtBRL(r.total)}</b></td><td class="wrap muted">${esc(f.pix||'')}</td></tr>`;
+  }).join('') : `<tr><td colspan="6" class="muted">Nenhuma diária a pagar entre ${fmtData(ini)} e ${fmtData(fim)}.</td></tr>`;
+  $('fo-foot').innerHTML = linhas.length ? `<tr><td></td><td>Total selecionado</td><td class="n">${fmtNum(qd)}</td><td></td><td class="n">${fmtBRL(tot)}</td><td></td></tr>` : '';
+  $('fo-gerar').disabled = !linhas.length || !tot;
+  $('fo-gerar').textContent = tot ? `Lançar ${fmtBRL(tot)} em Salário` : 'Lançar pagamento em Salário';
+}
+async function gerarFolha(){
+  if (!exigeApi4($('fo-erro'))) return;
+  const ini = $('fo-ini').value, fim = $('fo-fim').value, data = $('fo-data').value, forma = $('fo-forma').value, venc = $('fo-venc').value;
+  if (!ini || !fim || fim < ini){ $('fo-erro').textContent = 'Confira o período (de / até).'; return; }
+  if (!data || !forma){ $('fo-erro').textContent = 'Informe a data e a forma de pagamento.'; return; }
+  if (forma===FORMA_PEND && !venc){ $('fo-erro').textContent = 'Informe a data prevista de pagamento.'; return; }
+  const sel = funcObra(true).filter(f=>folhaSel[f.id]!==false && diasAPagar(f.id, ini, fim).length);
+  if (!sel.length){ $('fo-erro').textContent = 'Selecione ao menos um funcionário.'; return; }
+  const total = sel.reduce((s,f)=>s+resumoDiarias(diasAPagar(f.id, ini, fim)).total,0);
+  if (!confirm(`Lançar ${sel.length} pagamento(s) de diárias, somando ${fmtBRL(total)}, na categoria Salário?\n\nPeríodo: ${fmtData(ini)} a ${fmtData(fim)} · ${forma}`)) return;
+  $('fo-erro').textContent = '';
+  await enfileirar('folha.gerar', {obraId:obraAtualId(), ini, fim, data, forma, venc: forma===FORMA_PEND ? venc : '', itens: sel.map(f=>({funcId:f.id, lancId:uid()}))});
+  folhaSel = {}; renderObra(); toast(`Diárias lançadas em Salário — ${fmtBRL(total)}`); sincronizar();
+}
+/* mapa mensal */
+function renderMapa(){
+  const mes = $('mp-mes').value || chamada.data.slice(0,7); $('mp-mes').value = mes;
+  const [y, m] = mes.split('-').map(Number), nd = new Date(y, m, 0).getDate(), hoje = hojeIso();
+  const F = funcObra(true).filter(f=>f.ativo!==false || presObra().some(p=>p.funcId===f.id && p.data.startsWith(mes)));
+  const dias = Array.from({length:nd}, (_,i)=>`${mes}-${String(i+1).padStart(2,'0')}`);
+  const ini = d => isoToDate(d).toLocaleDateString('pt-BR',{weekday:'narrow'});
+  $('mp-head').innerHTML = `<tr><th class="fx">Funcionário</th>${dias.map(d=>`<th class="d ${isoToDate(d).getDay()===0?'dom':''} ${d===hoje?'hoje':''}" title="${fmtData(d)}">${+d.slice(8)}<small>${ini(d)}</small></th>`).join('')}<th class="n">Dias</th><th class="n">Valor</th></tr>`;
+  $('mp-body').innerHTML = F.length ? F.map(f=>{
+    const P = new Map(presObra().filter(p=>p.funcId===f.id && p.data.startsWith(mes)).map(p=>[p.data, p]));
+    let qd = 0, val = 0;
+    const cel = dias.map(d=>{ const p = P.get(d); if (!p) return `<td class="d ${isoToDate(d).getDay()===0?'dom':''}" data-dia="${d}"></td>`;
+      const k = PRES[String(+p.fracao)] || PRES['0']; qd += +p.fracao; val += valorDia(p);
+      return `<td class="d ${k.cls} ${p.lancId?'pg':''}" data-dia="${d}" title="${fmtData(d)} — ${k.rot}${p.lancId?' (pago)':''}">${k.curto}</td>`; }).join('');
+    return `<tr><td class="fx"><b>${esc(f.nome)}</b><small>${esc(f.funcao||'')}</small></td>${cel}<td class="n">${fmtNum(qd)}</td><td class="n">${fmtBRL(val)}</td></tr>`;
+  }).join('') : `<tr><td class="muted" colspan="${nd+3}">Sem funcionários cadastrados.</td></tr>`;
+}
+/* cadastro */
+function renderFuncs(){
+  $('dl-funcao').innerHTML = FUNCOES.map(x=>`<option value="${esc(x)}">`).join('');
+  const P = presObra(), pode = podeEquipe();
+  const FT = funcObra(true);
+  $('fu-lista').innerHTML = FT.length ? FT.map(f=>{
+    const Pf = P.filter(p=>p.funcId===f.id && +p.fracao>0), pago = round2(Pf.filter(p=>p.lancId).reduce((s,p)=>s+valorDia(p),0)), ap = round2(Pf.filter(p=>!p.lancId).reduce((s,p)=>s+valorDia(p),0));
+    return `<tr class="${f.ativo===false?'inativo':''}"><td><span class="avatar sm">${esc(iniciais(f.nome))}</span> <b>${esc(f.nome)}</b>${f.ativo===false?' <span class="tag">inativo</span>':''}${f._pend?' <span class="tag">⏳</span>':''}</td>
+      <td>${esc(f.funcao||'')}</td><td class="n">${fmtBRL(f.diaria)}</td><td class="n">${fmtNum(Pf.reduce((s,p)=>s+(+p.fracao),0))}</td><td class="n">${fmtBRL(pago)}</td>
+      <td class="n ${ap?'venc-atraso':''}">${fmtBRL(ap)}</td><td class="wrap">${esc([f.pix, f.telefone].filter(Boolean).join(' · '))}</td>
+      <td>${pode?`<button class="btn sm" data-act="editFunc" data-id="${f.id}" type="button">Editar</button> <button class="btn sm" data-act="ativoFunc" data-id="${f.id}" type="button">${f.ativo===false?'Reativar':'Inativar'}</button>`:''}</td></tr>`;
+  }).join('') : `<tr><td colspan="8" class="muted">Nenhum funcionário cadastrado.</td></tr>`;
+}
+function limparFunc(){
+  funcEditando = null; ['fu-nome','fu-funcao','fu-diaria','fu-pix','fu-tel'].forEach(i=>$(i).value=''); $('fu-ativo').checked = true; $('fu-erro').textContent = '';
+  $('fu-titulo').textContent = 'Cadastrar funcionário'; $('fu-salvar').textContent = 'Salvar funcionário';
+}
+function editarFunc(id){
+  const f = S.func.find(x=>x.id===id); if (!f) return;
+  funcEditando = id; $('fu-nome').value = f.nome; $('fu-funcao').value = f.funcao||''; $('fu-diaria').value = fmtValor(f.diaria); $('fu-pix').value = f.pix||''; $('fu-tel').value = f.telefone||'';
+  $('fu-ativo').checked = f.ativo!==false; $('fu-titulo').textContent = 'Editar funcionário'; $('fu-salvar').textContent = 'Atualizar funcionário'; $('fu-erro').textContent = '';
+  $('cardFunc').scrollIntoView({behavior:'smooth', block:'start'}); $('fu-nome').focus();
+}
+async function salvarFunc(){
+  if (!exigeApi4($('fu-erro'))) return;
+  const nome = $('fu-nome').value.trim(), diaria = parseNum($('fu-diaria').value);
+  if (!nome){ $('fu-erro').textContent = 'Informe o nome.'; return; }
+  if (!(diaria > 0)){ $('fu-erro').textContent = 'Informe o valor da diária (ex.: 150,00).'; return; }
+  if (!funcEditando && funcObra(true).some(f=>f.nome.toLowerCase()===nome.toLowerCase()) && !confirm(`Já existe "${nome}" nesta obra. Cadastrar mesmo assim?`)) return;
+  const id = funcEditando || uid();
+  const f = S.func.find(x=>x.id===id);
+  if (f && round2(diaria) !== round2(f.diaria)) toast('O novo valor da diária vale para as próximas chamadas; dias já marcados mantêm o valor anterior.');
+  await enfileirar('func.salvar', {id, obraId:obraAtualId(), nome, funcao:$('fu-funcao').value.trim(), diaria:round2(diaria), pix:$('fu-pix').value.trim(), telefone:$('fu-tel').value.trim(), ativo:$('fu-ativo').checked});
+  const editou = !!funcEditando; limparFunc(); renderObra(); if (!editou) toast(`${nome} cadastrado(a) na equipe`); sincronizar();
+}
+async function alternarAtivoFunc(id){
+  const f = S.func.find(x=>x.id===id); if (!f || !exigeApi4()) return;
+  const ativo = f.ativo===false;
+  if (!ativo && !confirm(`Inativar ${f.nome}? Ele(a) sai da chamada diária, mas o histórico e as diárias a pagar continuam.`)) return;
+  await enfileirar('func.salvar', {id, obraId:f.obraId, nome:f.nome, funcao:f.funcao||'', diaria:f.diaria, pix:f.pix||'', telefone:f.telefone||'', ativo});
+  renderObra(); toast(`${f.nome} ${ativo?'reativado(a)':'inativado(a)'}`); sincronizar();
+}
+
+/* ---------- exclusão de obra (administrador, requer internet) ---------- */
+let excluindo = null;
+function abrirExclusao(id, nome, info){
+  excluindo = {id, nome}; $('ex-nome').textContent = nome; $('ex-info').textContent = info || ''; $('ex-conf').value = ''; $('ex-erro').textContent = ''; $('ex-ok').disabled = true;
+  $('dlgExcluir').showModal(); $('ex-conf').focus();
+}
+async function confirmarExclusao(){
+  if (!excluindo) return;
+  if (BASE && (BASE.api||1) < 4){ $('ex-erro').textContent = 'O servidor ainda não exclui obras. Conclua a Parte 1 da atualização (Google).'; return; }
+  $('ex-ok').disabled = true; $('ex-erro').textContent = 'Excluindo…';
+  try {
+    await api('obraStatus', {id:excluindo.id, acao:'excluir', confirmacao:$('ex-conf').value});
+    $('dlgExcluir').close(); toast(`Obra "${excluindo.nome}" excluída. Ela pode ser restaurada no painel do administrador.`);
+    const eraAtual = obraAtualId()===excluindo.id; excluindo = null;
+    await sincronizar(true);
+    if (eraAtual) irInicio(); else if (location.hash==='#/admin') carregarObrasAdmin();
+  } catch(e){ $('ex-erro').textContent = e instanceof ErroRede ? 'Sem conexão. Excluir uma obra requer internet.' : e.message; $('ex-ok').disabled = false; }
+}
+
 /* ---------- ações ---------- */
 async function acao(act, id){
   const l = S.lanc.find(x=>x.id===id);
@@ -1195,6 +1480,13 @@ async function acao(act, id){
   if (act==='resetSenha') resetSenhaUsuario(id);
   if (act==='encerrar') encerrarSessoes(id);
   if (act==='editUser') editarUsuario(id);
+  if (act==='editFunc') editarFunc(id);
+  if (act==='ativoFunc') alternarAtivoFunc(id);
+  if (act==='obAbrir') irObra(id);
+  if (act==='obArquivar') statusObra(id, 'arquivar');
+  if (act==='obReativar') statusObra(id, 'reativar');
+  if (act==='obExcluir') statusObra(id, 'excluir');
+  if (act==='obRestaurar') statusObra(id, 'restaurar');
 }
 async function confirmarCancelamento(){
   const motivo = $('cn-motivo').value.trim();
@@ -1219,11 +1511,12 @@ function abrirTab(t){
   document.querySelectorAll('section.tab').forEach(s=>s.classList.toggle('on', s.id==='tab-'+t));
   if (t==='resumo') renderResumo();
   if (t==='hist') carregarHistorico();
+  if (t==='equipe') renderEquipe();
 }
 async function gerarExcel(){
   if (typeof XLSX === 'undefined'){ alert('Componente do Excel não carregou. Recarregue a página.'); return; }
   const o = obraAtual();
-  const wb = construirWorkbook(o, ativos(), PREFS.agrupamento||'semana', perObra());
+  const wb = construirWorkbook(o, ativos(), PREFS.agrupamento||'semana', perObra(), {func:funcObra(true), pres:presObra()});
   const d = hojeIso().split('-').reverse().join('-');
   const nome = `Controle de Gastos - ${o.nome.replace(/[\\/:*?"<>|]/g,'-')} - ${d}.xlsx`;
   try { XLSX.writeFile(wb, nome); } catch(e){ /* download bloqueado pelo navegador */ }
@@ -1297,6 +1590,46 @@ async function encerrarSessoes(id){
   const u = USUARIOS.find(x=>x.id===id); if (!u || !confirm(`Desconectar ${u.nome} de todos os aparelhos? Use em caso de celular perdido ou suspeita de acesso indevido.`)) return;
   try { await api('usuarioEncerrarSessoes', {id}); toast('Sessões encerradas'); } catch(e){ toast(e.message); }
 }
+/* ---------- painel do administrador: obras ---------- */
+let OBRAS_TODAS = [], abaAdmin = 'obras';
+const SIT_OBRA = {ativa:['Ativa','ok'], arquivada:['Arquivada',''], excluida:['Excluída','bad']};
+function abrirAbaAdmin(a){
+  abaAdmin = a;
+  document.querySelectorAll('[data-adm]').forEach(b=>{ b.classList.toggle('on', b.dataset.adm===a); b.setAttribute('aria-selected', b.dataset.adm===a); });
+  $('adm-obras').hidden = a!=='obras'; $('adm-usuarios').hidden = a!=='usuarios';
+}
+async function carregarObrasAdmin(){
+  if (BASE && (BASE.api||1) < 4){
+    $('obLista').innerHTML = '<tr><td colspan="7" class="muted">Para gerenciar as obras aqui, conclua a Parte 1 da atualização (Google).</td></tr>'; return; }
+  $('obLista').innerHTML = '<tr><td colspan="7" class="muted">Carregando…</td></tr>';
+  try { const r = await api('obrasAdmin'); OBRAS_TODAS = r.obras; renderObrasAdmin(); }
+  catch(e){ $('obLista').innerHTML = `<tr><td colspan="7" class="muted">${esc(e instanceof ErroRede ? 'Sem conexão. O painel do administrador requer internet.' : e.message)}</td></tr>`; }
+}
+function renderObrasAdmin(){
+  const filtro = $('ob-filtro').value;
+  const L = OBRAS_TODAS.filter(o=>!filtro || o.situacao===filtro).sort((a,b)=>(a.situacao==='excluida')-(b.situacao==='excluida') || a.nome.localeCompare(b.nome,'pt-BR'));
+  const cont = s => OBRAS_TODAS.filter(o=>o.situacao===s).length;
+  $('ob-resumo').textContent = `${cont('ativa')} ativa(s) · ${cont('arquivada')} arquivada(s) · ${cont('excluida')} excluída(s)`;
+  $('obLista').innerHTML = L.length ? L.map(o=>{
+    const [rot, cls] = SIT_OBRA[o.situacao];
+    const b = (act, txt, extra) => `<button class="btn sm ${extra||''}" data-act="${act}" data-id="${o.id}" type="button">${txt}</button>`;
+    const acoes = o.situacao==='ativa' ? b('obAbrir','Abrir') + ' ' + b('obArquivar','Arquivar') + ' ' + b('obExcluir','Excluir','danger')
+      : o.situacao==='arquivada' ? b('obReativar','Reativar') + ' ' + b('obExcluir','Excluir','danger')
+      : b('obRestaurar','Restaurar','pri');
+    return `<tr class="${o.situacao==='excluida'?'inativo':''}"><td><b>${esc(o.nome)}</b><br><small class="muted">${esc(o.cidade||'')}</small></td>
+      <td><span class="tag ${cls}">${rot}</span>${o.excluidaEm?`<br><small class="muted">em ${fmtDataHora(o.excluidaEm)}</small>`:''}</td>
+      <td class="n">${o.lancamentos}</td><td class="n">${o.funcionarios}</td><td>${o.ultimo?fmtData(o.ultimo):'—'}</td><td>${o.criadoEm?fmtData(String(o.criadoEm).slice(0,10)):''}</td><td>${acoes}</td></tr>`;
+  }).join('') : '<tr><td colspan="7" class="muted">Nenhuma obra nesta situação.</td></tr>';
+}
+async function statusObra(id, acao){
+  const o = OBRAS_TODAS.find(x=>x.id===id); if (!o) return;
+  if (acao==='excluir') return abrirExclusao(id, o.nome, `${o.lancamentos} lançamento(s) e ${o.funcionarios} funcionário(s) cadastrados.`);
+  const txt = {arquivar:`Arquivar "${o.nome}"? Ela sai da lista de todos os usuários, mas pode ser reativada aqui.`, reativar:`Reativar "${o.nome}"?`, restaurar:`Restaurar "${o.nome}"? A obra volta para a lista e a pasta sai da lixeira do Drive.`}[acao];
+  if (!confirm(txt)) return;
+  try { await api('obraStatus', {id, acao}); toast({arquivar:'Obra arquivada', reativar:'Obra reativada', restaurar:'Obra restaurada'}[acao]); await carregarObrasAdmin(); sincronizar(true); }
+  catch(e){ toast(e instanceof ErroRede ? 'Sem conexão. O painel do administrador requer internet.' : e.message); }
+}
+
 async function salvarListas(){
   const lst = id => [...new Set($(id).value.split('\n').map(s=>s.trim()).filter(Boolean))];
   try {
@@ -1351,7 +1684,7 @@ function registrarSW(){
 function ligarEventos(){
   document.querySelectorAll('.btnTema').forEach(b=>b.onclick=alternarTema);
   document.querySelectorAll('.sync').forEach(b=>b.onclick=()=>sincronizar(true));
-  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', ()=>{ if ((PREFS.tema||'auto')==='auto' && S) renderResumo(); });
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', ()=>{ if (PREFS.tema==='auto' && S && obraAtualId()) renderResumo(); });
   window.addEventListener('hashchange', ()=>rotear());
   window.addEventListener('online', ()=>{ statusSync(); sincronizar(); });
   window.addEventListener('offline', statusSync);
@@ -1417,7 +1750,21 @@ function ligarEventos(){
     const conflito = perObra().find(p=>!(fim<p.ini||ini>p.fim)); if(conflito && !confirm(`Este período se sobrepõe a "${conflito.nome}". Adicionar mesmo assim?`)) return;
     await enfileirar('periodo.salvar', {id:uid(), obraId:obraAtualId(), nome, ini, fim}); ['p-nome','p-ini','p-fim'].forEach(i=>$(i).value='');
     renderObra(); toast('Período adicionado'); sincronizar(); };
+  // equipe
+  $('eq-data').onchange = e=>trocarDiaChamada(e.target.value);
+  $('eq-ant').onclick = ()=>{ const d = isoToDate(chamada.data); d.setDate(d.getDate()-1); trocarDiaChamada(dateToIso(d)); };
+  $('eq-prox').onclick = ()=>{ const d = isoToDate(chamada.data); d.setDate(d.getDate()+1); trocarDiaChamada(dateToIso(d)); };
+  $('eq-hoje').onclick = ()=>trocarDiaChamada(hojeIso());
+  $('eq-salvar').onclick = salvarChamada; $('eq-todos').onclick = todosPresentes;
+  ['fo-ini','fo-fim','fo-forma'].forEach(id=>$(id).onchange = renderFolha);
+  $('fo-gerar').onclick = gerarFolha;
+  $('mp-mes').onchange = renderMapa;
+  $('fu-salvar').onclick = salvarFunc; $('fu-limpar').onclick = limparFunc;
+  $('o-excluir').onclick = ()=>{ const o = obraAtual(); abrirExclusao(o.id, o.nome, `${lancObra().filter(l=>!l.cancelado).length} lançamento(s) e ${funcObra(true).length} funcionário(s) cadastrados.`); };
+  $('ex-conf').oninput = ()=>{ $('ex-ok').disabled = !excluindo || $('ex-conf').value.trim().toLowerCase() !== excluindo.nome.trim().toLowerCase(); };
+  $('ex-ok').onclick = confirmarExclusao; $('ex-voltar').onclick = ()=>{ excluindo = null; $('dlgExcluir').close(); };
   // admin
+  $('ob-filtro').onchange = renderObrasAdmin; $('ob-atualizar').onclick = carregarObrasAdmin;
   $('u-salvar').onclick = salvarUsuario; $('u-novo').onclick = novoUsuario;
   $('u-perfil').onchange = ()=>{ $('u-obrasWrap').hidden = $('u-perfil').value==='admin'; };
   // cliques delegados
@@ -1426,6 +1773,10 @@ function ligarEventos(){
     const op = e.target.closest('[data-open]'); if (op) return irObra(op.dataset.open);
     const it = e.target.closest('[data-irtab]'); if (it){ abrirTab(it.dataset.irtab); window.scrollTo({top:0,behavior:'smooth'}); return; }
     const pk = e.target.closest('[data-pick]'); if (pk){ $('f-cat').value = pk.dataset.pick; updateFormVisibility(); dicaPreco(); return; }
+    const pr = e.target.closest('[data-pres]'); if (pr){ if (!pr.disabled) marcar(pr.dataset.func, +pr.dataset.pres); return; }
+    const fs = e.target.closest('[data-folha]'); if (fs){ folhaSel[fs.dataset.folha] = fs.checked; renderFolha(); return; }
+    const am = e.target.closest('[data-adm]'); if (am){ abrirAbaAdmin(am.dataset.adm); return; }
+    const ol = e.target.closest('[data-olho]'); if (ol){ const i = $(ol.dataset.olho); const ver = i.type==='password'; i.type = ver ? 'text' : 'password'; ol.setAttribute('aria-pressed', ver); ol.title = ver ? 'Ocultar senha' : 'Mostrar senha'; return; }
     const b = e.target.closest('[data-act]'); if (b) return acao(b.dataset.act, b.dataset.id);
     const c = e.target.closest('[data-cat]'); if (c){ listaCat=c.dataset.cat; renderLista(); return; }
     const s = e.target.closest('th[data-sort]'); if (s){ sortD = sortK===s.dataset.sort ? -sortD : 1; sortK=s.dataset.sort; renderLista(); }

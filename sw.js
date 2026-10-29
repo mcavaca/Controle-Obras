@@ -1,6 +1,6 @@
 /* Service worker: guarda o aplicativo no aparelho para abrir sem internet.
    Os dados NÃO passam por aqui — ficam no IndexedDB e vão ao servidor pela fila. */
-const VERSAO = 'co-v1.3.0';
+const VERSAO = 'co-v1.4.0';
 const ARQUIVOS = [
   './', 'index.html', 'app.js', 'theme.js', 'manifest.webmanifest',
   'xlsx.bundle.js', 'chart.umd.js', 'icon-192.png', 'icon-512.png'

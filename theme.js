@@ -1,6 +1,5 @@
-/* Aplica o tema salvo antes de desenhar a página (evita "piscar") */
+/* Aplica o tema salvo antes de desenhar a página (evita "piscar"). Padrão: escuro. */
 try {
   var p = JSON.parse(localStorage.getItem('co_prefs') || '{}');
-  if (p.tema === 'claro') document.documentElement.dataset.theme = 'light';
-  else if (p.tema === 'escuro') document.documentElement.dataset.theme = 'dark';
-} catch (e) { /* sem preferências */ }
+  document.documentElement.dataset.theme = p.tema === 'claro' ? 'light' : p.tema === 'auto' ? 'auto' : 'dark';
+} catch (e) { document.documentElement.dataset.theme = 'dark'; }
