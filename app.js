@@ -5,23 +5,30 @@
      sem internet, tudo é lançado normalmente e enviado depois.
    ========================================================================= */
 'use strict';
-const VERSAO_APP = '1.2.0 · edição tablet';
+const VERSAO_APP = '1.3.0 · edição tablet';
 const FORMA_PEND = 'A pagar';   // forma de pagamento que deixa o item pendente até a baixa
 
 /* =====================================================================
    NÚCLEO — regras de negócio (iguais às do servidor)
    ===================================================================== */
 const CATS = {
-  enviado:  {nome:'Valor enviado',    cor:'#2e7d32'},
+  cliente:  {nome:'Valor pago pelo cliente', cor:'#0a7a3d'},
+  enviado:  {nome:'Valor enviado',    cor:'#7a5c00'},
   mo:       {nome:'Mão de Obra',      cor:'#1565c0'},
   material: {nome:'Material',         cor:'#7b1fa2'},
   dia:      {nome:'Custos dia a dia', cor:'#b84300'},
   salario:  {nome:'Salário',          cor:'#00838f'},
   apagar:   {nome:'Valor a pagar',    cor:'#c62828'}
 };
-const CAT_ORDER = ['enviado','mo','material','dia','salario','apagar'];
-const CAT_TOTAL = ['mo','material','dia','salario','apagar'];
-const CAT_PROPRIETARIO = ['enviado','mo','material','salario','apagar'];
+const CAT_ORDER = ['cliente','enviado','mo','material','dia','salario','apagar'];
+const CAT_CUSTO = ['mo','material','dia','salario'];             // custos lançados
+const CAT_TOTAL = ['mo','material','dia','salario','apagar'];    // custo total da obra
+const CAT_PROPRIETARIO = ['cliente','enviado','mo','material','salario','apagar'];
+const ORC_CATS = CAT_CUSTO;
+const TIPOS = {enviado:['Adiantamento para custos','Reembolso recebido'], cliente:['Sinal / entrada','Medição','Parcela','Aditivo','Outros']};
+const RE_PREVISTO = /Previsto em "A pagar"|\(previsto para /;
+/** Item lançado para pagar depois (categoria "Valor a pagar" ou forma "A pagar"), pago ou não. */
+const ehPrevistoAPagar = l => l.categoria==='apagar' || l.status==='Pendente' || l.forma==='A pagar' || !!l.venc || RE_PREVISTO.test(l.obs||'');
 const ehPendente = l => !l.cancelado && l.status==='Pendente';
 const PERFIL_NOME = {admin:'Administrador', engenheiro:'Engenheiro', proprietario:'Proprietário'};
 const FMT_BRL = '"R$" #,##0.00;[Red]-"R$" #,##0.00';
@@ -39,7 +46,8 @@ function parseNum(s){
   if (typeof s === 'number') return s;
   s = String(s ?? '').trim().replace(/\s|R\$/g,'');
   if (!s) return NaN;
-  if (s.includes(',')) s = s.replace(/\./g,'').replace(',','.');
+  if (s.includes(',')) s = s.replace(/\./g,'').replace(',','.');          // 1.234,56 → 1234.56
+  else if (/^-?\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g,'');      // 120.000 → 120000 (ponto de milhar)
   return Number(s);
 }
 const fmtBRL = n => ((+n)||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
@@ -54,24 +62,83 @@ const hojeIso = () => dateToIso(new Date());
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g,c=>(c^crypto.getRandomValues(new Uint8Array(1))[0]&15>>c/4).toString(16)));
 const clone = o => JSON.parse(JSON.stringify(o));
 
+/* ---------------------------------------------------------------------
+   Modelo financeiro (v1.3)
+   • Custos lançados   = Mão de Obra + Material + Custos dia a dia + Salário
+   • Custo total       = Custos lançados + "Valor a pagar" ainda sem categoria
+   • Resultado atual   = Valor pago pelo cliente − Custos lançados
+   • Lucro esperado    = Valor pago pelo cliente − Custo total
+   • Valor a pagar (previsto) = tudo que foi lançado para pagar depois,
+     separado em já pago e pendente — continua visível depois da baixa.
+   --------------------------------------------------------------------- */
 function totais(list){
-  const t = {enviado:0,mo:0,material:0,dia:0,salario:0,apagar:0,adiant:0,reembRec:0,pend:0,diaPend:0,qPend:0};
-  let prox = null;
+  const t = {cliente:0,enviado:0,mo:0,material:0,dia:0,salario:0,apagar:0,adiant:0,reembRec:0,pend:0,diaPend:0,qPend:0,
+    prevAPagar:0,pagoAPagar:0,qPrev:0,vencido:0,qVencido:0,qCliente:0};
+  const hoje = hojeIso(); let prox = null;
   for (const l of list){
     if (l.cancelado) continue;
-    t[l.categoria] = (t[l.categoria]||0) + (+l.total||0);
+    const v = +l.total||0;
+    t[l.categoria] = (t[l.categoria]||0) + v;
+    if (l.categoria==='cliente') t.qCliente++;
     if (l.status==='Pendente'){
-      t.pend += +l.total||0; t.qPend++;
-      if (l.categoria==='dia') t.diaPend += +l.total||0;
+      t.pend += v; t.qPend++;
+      if (l.categoria==='dia') t.diaPend += v;
       if (l.venc && (!prox || l.venc < prox.venc)) prox = l;
+      if (l.venc && l.venc < hoje){ t.vencido += v; t.qVencido++; }
     }
-    if (l.categoria==='enviado'){ if (l.tipo==='Reembolso recebido') t.reembRec += +l.total||0; else t.adiant += +l.total||0; }
+    if (ehPrevistoAPagar(l)){ t.prevAPagar += v; t.qPrev++; if (l.status!=='Pendente') t.pagoAPagar += v; }
+    if (l.categoria==='enviado'){ if (l.tipo==='Reembolso recebido') t.reembRec += v; else t.adiant += v; }
   }
-  for (const k in t) if (k!=='qPend') t[k] = round2(t[k]);
+  for (const k in t) if (!/^q/.test(k)) t[k] = round2(t[k]);
   t.proxVenc = prox ? prox.venc : '';
   t.reembolso = round2(t.dia - t.diaPend - t.enviado);   // custos dia a dia ainda "A pagar" não entram no reembolso
-  t.total = round2(CAT_TOTAL.reduce((a,k)=>a+t[k],0));
+  t.custoLancado = round2(CAT_CUSTO.reduce((a,k)=>a+t[k],0));
+  t.custoTotal = round2(t.custoLancado + t.apagar);
+  t.total = t.custoTotal;
+  t.resultadoAtual = round2(t.cliente - t.custoLancado);
+  t.lucro = round2(t.cliente - t.custoTotal);
+  t.margem = t.cliente > 0 ? t.lucro / t.cliente : null;
+  t.situacao = t.lucro > 0.004 ? 'lucro' : t.lucro < -0.004 ? 'prejuizo' : 'equilibrio';
   return t;
+}
+const SITUACAO = {lucro:'Lucro', prejuizo:'Prejuízo', equilibrio:'Equilíbrio'};
+const pct = x => (x==null || !isFinite(x)) ? '—' : (x*100).toLocaleString('pt-BR',{maximumFractionDigits:1}) + '%';
+
+/** Contrato, orçamento, prazo e alertas da obra (sempre sobre a obra inteira). */
+function analise(o, t){
+  const a = {alertas:[]}, orc = (o && o.orcamento) || {};
+  const alerta = (nivel, texto) => a.alertas.push({nivel, texto});
+  a.contrato = +(o && o.contrato) || 0; a.area = +(o && o.area) || 0;
+  a.orcTotal = round2(ORC_CATS.reduce((s,k)=>s+(+orc[k]||0),0)); a.temOrc = a.orcTotal > 0;
+  if (a.contrato > 0){
+    a.aReceber = round2(a.contrato - t.cliente); a.pctRecebido = t.cliente / a.contrato;
+    a.margemPrevista = a.temOrc ? round2(a.contrato - a.orcTotal) : null;
+    a.margemProjetada = round2(a.contrato - Math.max(a.orcTotal, t.custoTotal));
+  }
+  if (a.temOrc){
+    a.pctOrc = t.custoTotal / a.orcTotal; a.saldoOrc = round2(a.orcTotal - t.custoTotal);
+    a.porCat = ORC_CATS.map(k=>({k, prev:+orc[k]||0, real:t[k], pct:(+orc[k]>0 ? t[k]/orc[k] : null)}));
+  }
+  if (a.area > 0){ a.custoM2 = t.custoTotal / a.area; if (a.temOrc) a.orcM2 = a.orcTotal / a.area; if (a.contrato) a.contratoM2 = a.contrato / a.area; }
+  if (o && o.ini && o.fim && o.fim > o.ini){
+    const ini = isoToDate(o.ini), fim = isoToDate(o.fim), h = isoToDate(hojeIso());
+    a.pctPrazo = Math.min(1, Math.max(0, (h-ini)/(fim-ini))); a.diasRestantes = Math.round((fim-h)/864e5);
+  }
+  if (t.situacao==='prejuizo') alerta('crit', `Prejuízo esperado de ${fmtBRL(-t.lucro)}: o custo total da obra supera o valor pago pelo cliente.` +
+    (a.contrato > 0 && a.aReceber > 0 ? ` Ainda faltam ${fmtBRL(a.aReceber)} a receber pelo contrato.` : ''));
+  if (a.contrato > 0 && t.custoTotal > a.contrato) alerta('crit', `O custo total (${fmtBRL(t.custoTotal)}) já passou o valor do contrato (${fmtBRL(a.contrato)}).`);
+  if (a.temOrc) a.porCat.forEach(c=>{
+    if (c.pct===null) return;
+    if (c.pct > 1) alerta('crit', `${CATS[c.k].nome} estourou o orçamento: ${pct(c.pct)} (${fmtBRL(c.real)} de ${fmtBRL(c.prev)}).`);
+    else if (c.pct >= 0.9) alerta('aviso', `${CATS[c.k].nome} já usou ${pct(c.pct)} do orçamento (${fmtBRL(c.real)} de ${fmtBRL(c.prev)}).`);
+  });
+  if (a.temOrc && a.pctPrazo!=null && a.pctOrc - a.pctPrazo > 0.15)
+    alerta('aviso', `Custos à frente do prazo: ${pct(a.pctOrc)} do orçamento gasto com ${pct(a.pctPrazo)} do prazo decorrido.`);
+  if (t.qVencido) alerta('aviso', `${t.qVencido} pagamento(s) vencido(s), somando ${fmtBRL(t.vencido)}.`);
+  if (a.diasRestantes!=null && a.diasRestantes < 0) alerta('aviso', `O prazo previsto terminou há ${-a.diasRestantes} dia(s).`);
+  if (t.reembolso > 0.004) alerta('info', `Reembolso pendente ao engenheiro: ${fmtBRL(t.reembolso)}.`);
+  if (t.situacao==='lucro' && !a.alertas.some(x=>x.nivel==='crit')) alerta('ok', `Lucro esperado de ${fmtBRL(t.lucro)} (${pct(t.margem)} do valor pago pelo cliente).`);
+  return a;
 }
 function interpretaReemb(v){
   if (v > 0.004)  return 'A reembolsar ao engenheiro';
@@ -132,7 +199,7 @@ function montarAba(M, larguras, merges){
 }
 const G = { data:l=>l.data, doc:l=>l.doc, forn:l=>l.fornecedor, desc:l=>l.descricao, etapa:l=>l.etapa, forma:l=>l.forma, qtd:l=>l.qtd, un:l=>l.unidade,
   vu:l=>l.vu, mes:l=>fmtMes(l.mesRef), obs:l=>l.obs, sub:l=>l.subcat, status:l=>l.status, venc:l=>l.venc, tipo:l=>l.tipo, total:l=>l.total,
-  por:l=>nomeUsuario(l.criadoPor), comp:l=>l.comprovanteId?'Sim':'' };
+  por:l=>nomeUsuario(l.criadoPor), comp:l=>l.comprovanteId?'Sim':'', catNome:l=>CATS[l.categoria]?CATS[l.categoria].nome:l.categoria };
 const TIPO = {data:'date',venc:'date',qtd:'num',vu:'money'};
 const col = (h,k,w) => ({h,k,w,t:TIPO[k]||'txt',get:G[k]});
 function abaSimples(nome, titulo, info, cols, itens){
@@ -194,17 +261,21 @@ function construirWorkbook(obra, L, agrupamento, periodos){
   const gerado = new Date().toLocaleString('pt-BR');
   const info = `Obra: ${obra.nome}${obra.cidade?' — '+obra.cidade:''}  |  Gerado em ${gerado} por ${S.usuario.nome}`;
   const de = k => L.filter(l=>l.categoria===k).sort(porData);
-  const t = totais(L);
+  const t = totais(L), a = analise(obra, t);
   const comuns = [col('Forma de pagamento','forma',14),col('Qtd.','qtd',7),col('Unid.','un',7),col('Valor unitário (R$)','vu',15),col('Valor total (R$)','total',16),col('Mês ref.','mes',9),col('Comprovante','comp',12),col('Lançado por','por',18),col('Observações','obs',30),col('Situação','status',10),col('Vencimento','venc',11)];
+  const cli = abaSimples('Recebido do cliente','VALOR PAGO PELO CLIENTE',info,[col('Data','data',11),col('Nº NF / Recibo / Medição','doc',16),col('Tipo','tipo',18),col('Pagador','forn',26),col('Descrição','desc',34),...comuns], de('cliente'));
   const env = abaSimples('Valor enviado','VALOR ENVIADO PELO PROPRIETÁRIO',info,[col('Data','data',11),col('Nº documento','doc',14),col('Tipo','tipo',24),col('Origem do recurso','forn',26),col('Descrição','desc',34),...comuns], de('enviado'));
   const mo  = abaSimples('Mão de Obra','MÃO DE OBRA',info,[col('Data','data',11),col('Nº documento','doc',14),col('Beneficiário','forn',24),col('Descrição','desc',34),col('Etapa da obra','etapa',16),...comuns], de('mo'));
   const mat = abaSimples('Material','MATERIAL',info,[col('Data','data',11),col('Nº NF / Recibo','doc',14),col('Fornecedor','forn',24),col('Material','desc',34),col('Etapa da obra','etapa',16),...comuns], de('material'));
   const dia = abaCustos('Custos dia a dia','CUSTOS DIA A DIA',info, de('dia'), agrupamento||'semana', periodos);
   const sal = abaSimples('Salário','SALÁRIO DO ENGENHEIRO',info,[col('Data','data',11),col('Nº documento','doc',14),col('Origem','forn',22),col('Descrição','desc',34),...comuns], de('salario'));
-  const pag = abaSimples('A pagar','PREVISÃO DE PAGAMENTOS (A PAGAR)',info,[col('Data','data',11),col('Vencimento','venc',11),col('Fornecedor / Beneficiário','forn',26),col('Descrição','desc',40),col('Etapa da obra','etapa',16),
-    col('Qtd.','qtd',7),col('Unid.','un',7),col('Valor unitário (R$)','vu',15),col('Valor total (R$)','total',16),col('Status','status',10),col('Lançado por','por',18),col('Observações','obs',30)],
-    de('apagar').sort((a,b)=>(a.venc||'').localeCompare(b.venc||'')));
-  // ATENÇÃO: as colunas C (Tipo) e J (Valor total) da aba "Valor enviado" são usadas abaixo
+  // "A pagar": tudo que foi lançado para pagar depois — pago ou pendente. Colunas C (categoria), J (total) e K (situação) são usadas nas fórmulas.
+  const prev = L.filter(ehPrevistoAPagar).sort((x,y)=>(x.venc||x.data||'').localeCompare(y.venc||y.data||''));
+  const pag = abaSimples('A pagar','VALORES A PAGAR (PREVISTOS) — PAGOS E PENDENTES',info,[col('Data','data',11),col('Vencimento','venc',11),col('Categoria atual','catNome',18),
+    col('Fornecedor / Beneficiário','forn',24),col('Descrição','desc',36),col('Etapa da obra','etapa',16),col('Qtd.','qtd',7),col('Unid.','un',7),col('Valor unitário (R$)','vu',15),
+    col('Valor total (R$)','total',16),col('Situação','status',10),col('Forma','forma',12),col('Lançado por','por',18),col('Observações','obs',34)], prev);
+  const semCat = `SUMIF('A pagar'!C:C,"${CATS.apagar.nome}",'A pagar'!J:J)`;
+  // Reembolso (inalterado). Colunas C (Tipo) e J (Valor total) da aba "Valor enviado".
   const rng = env.RN>=env.R0 ? [`'Valor enviado'!C${env.R0}:C${env.RN}`, `'Valor enviado'!J${env.R0}:J${env.RN}`] : null;
   const RM = [
     [cT('DEMONSTRATIVO DE REEMBOLSO',XS.title)], [cT(info,XS.info)], [],
@@ -220,22 +291,83 @@ function construirWorkbook(obra, L, agrupamento, periodos){
     [cT(`Custos dia a dia com forma "A pagar" ainda pendentes (${fmtBRL(t.diaPend)}) entram no reembolso depois de pagos.`,XS.info)]
   ];
   const reemb = montarAba(RM,[46,22],[{s:{r:0,c:0},e:{r:0,c:1}},{s:{r:1,c:0},e:{r:1,c:1}}]);
-  const linhas = [['Valor enviado', env.ref, t.enviado, false], ['Valor de Mão de Obra', mo.ref, t.mo, true], ['Valor de Material', mat.ref, t.material, true],
-    ['Custos dia a dia', dia.ref, t.dia, true], ['Valor de Salário', sal.ref, t.salario, true], ['Valor a pagar', pag.ref, t.apagar, true]];
+
+  // ---------- Resultado ----------
+  const R = [[cT('RESULTADO DA OBRA',XS.title)], [cT(info,XS.info)], [],
+    [cT('Demonstrativo do resultado',XS.head), cT('Valor (R$)',XS.head), cT('% do custo total',XS.head)]];
+  const linha = (rotulo, cel, estilo) => { R.push([cT(rotulo, estilo||XS.lbl), cel]); return R.length; };
+  const rCli = linha('(+) Valor pago pelo cliente', cF(cli.ref, t.cliente));
+  const rMo  = linha('(−) Mão de Obra', cF(mo.ref, t.mo));
+  const rMat = linha('(−) Material', cF(mat.ref, t.material));
+  const rDia = linha('(−) Custos dia a dia', cF(dia.ref, t.dia));
+  const rSal = linha('(−) Salário', cF(sal.ref, t.salario));
+  const rRes = linha('(=) Resultado atual (sem os valores a pagar)', cF(`B${rCli}-SUM(B${rMo}:B${rSal})`, t.resultadoAtual), XS.totLbl);
+  const rPag = linha('(−) Valor a pagar ainda sem categoria', cF(semCat, t.apagar));
+  const rLuc = linha('(=) LUCRO ESPERADO', cF(`B${rRes}-B${rPag}`, t.lucro, XS.grand), XS.grandLbl);
+  const rCT  = linha('Custo total da obra', cF(`SUM(B${rMo}:B${rSal})+B${rPag}`, t.custoTotal, XS.totVal), XS.totLbl);
+  R.push([cT('Situação',XS.lbl), cFs(`IF(B${rLuc}>0.004,"LUCRO",IF(B${rLuc}<-0.004,"PREJUÍZO","EQUILÍBRIO"))`, SITUACAO[t.situacao].toUpperCase(), XS.lbl)]); const rSit = R.length;
+  R.push([cT('Margem sobre o valor pago pelo cliente',XS.lbl), {t:'n', f:`IF(B${rCli}=0,0,B${rLuc}/B${rCli})`, v:t.margem||0, z:'0.0%', s:XS.pct}]);
+  [[rMo,t.mo],[rMat,t.material],[rDia,t.dia],[rSal,t.salario],[rPag,t.apagar]].forEach(([r,v])=>{ R[r-1][2] = {t:'n', f:`IF($B$${rCT}=0,0,B${r}/$B$${rCT})`, v:t.custoTotal? v/t.custoTotal : 0, z:'0.0%', s:XS.pct}; });
+  R.push([], [cT('Valores a pagar (previstos)',XS.head), cT('Valor (R$)',XS.head)]);
+  linha('Total lançado para pagar depois', cF(pag.ref, t.prevAPagar));
+  linha('Já pago', cF(`SUMIF('A pagar'!K:K,"Pago",'A pagar'!J:J)`, t.pagoAPagar));
+  linha('Pendente', cF(`SUMIF('A pagar'!K:K,"Pendente",'A pagar'!J:J)`, t.pend));
+  if (a.contrato > 0){
+    R.push([], [cT('Contrato',XS.head), cT('Valor (R$)',XS.head)]);
+    const rCon = linha('Valor do contrato', cM(a.contrato));
+    linha('Recebido do cliente', cF(`B${rCli}`, t.cliente));
+    linha('A receber', cF(`B${rCon}-B${rCli}`, a.aReceber));
+    R.push([cT('% recebido',XS.lbl), {t:'n', f:`IF(B${rCon}=0,0,B${rCli}/B${rCon})`, v:a.pctRecebido, z:'0.0%', s:XS.pct}]);
+    if (a.temOrc) linha('Margem prevista (contrato − orçamento)', cM(a.margemPrevista));
+    linha('Margem projetada (contrato − maior entre orçamento e custo total)', cM(a.margemProjetada));
+  }
+  if (a.temOrc){
+    R.push([], [cT('Orçamento × realizado',XS.head), cT('Previsto (R$)',XS.head), cT('Realizado (R$)',XS.head), cT('% usado',XS.head), cT('Saldo (R$)',XS.head)]);
+    const r0 = R.length + 1;
+    a.porCat.forEach((c,i)=>{ const r = R.length + 1, ref = [rMo,rMat,rDia,rSal][i];
+      R.push([cT(CATS[c.k].nome,XS.lbl), cM(c.prev), cF(`B${ref}`, c.real), {t:'n', f:`IF(B${r}=0,0,C${r}/B${r})`, v:c.pct||0, z:'0.0%', s:XS.pct}, cF(`B${r}-C${r}`, c.prev-c.real)]); });
+    const r1 = R.length, rt = R.length + 1;
+    R.push([cT('TOTAL',XS.totLbl), cF(`SUM(B${r0}:B${r1})`, a.orcTotal, XS.totVal), cF(`SUM(C${r0}:C${r1})+B${rPag}`, t.custoTotal, XS.totVal),
+      {t:'n', f:`IF(B${rt}=0,0,C${rt}/B${rt})`, v:a.pctOrc||0, z:'0.0%', s:XS.pct}, cF(`B${rt}-C${rt}`, a.saldoOrc, XS.totVal)]);
+    R.push([cT('O total realizado inclui os valores a pagar ainda sem categoria.',XS.info)]);
+  }
+  if (a.area > 0){
+    R.push([], [cT('Indicadores por m²',XS.head), cT('R$/m²',XS.head)]);
+    R.push([cT(`Área: ${fmtNum(a.area)} m²`,XS.info)]);
+    linha('Custo total por m²', cF(`B${rCT}/${a.area}`, a.custoM2));
+    if (a.temOrc) linha('Orçamento por m²', cM(a.orcM2));
+    if (a.contrato > 0) linha('Contrato por m²', cM(a.contratoM2));
+  }
+  R.push([], [cT('Resultado atual = Valor pago pelo cliente − (Mão de Obra + Material + Custos dia a dia + Salário).',XS.info)],
+    [cT('Lucro esperado = Valor pago pelo cliente − Custo total da obra (inclui os valores a pagar ainda sem categoria).',XS.info)]);
+  const resultado = montarAba(R,[52,18,16,12,16],[{s:{r:0,c:0},e:{r:0,c:4}},{s:{r:1,c:0},e:{r:1,c:4}}]);
+
+  // ---------- Início ----------
   const IM = [[cT(`CONTROLE DE GASTOS — ${obra.nome.toUpperCase()}`,XS.title)],
-    [cT('Cidade/UF',XS.lbl), cT(obra.cidade||'')], [cT('Proprietário',XS.lbl), cT(obra.prop||'')],
-    [cT('Engenheiro responsável',XS.lbl), cT(obra.eng||'')], [cT('Início da obra',XS.lbl), cD(obra.ini||'')],
+    [cT('Cidade/UF',XS.lbl), cT(obra.cidade||'')], [cT('Proprietário / Contratante',XS.lbl), cT(obra.prop||'')],
+    [cT('Engenheiro responsável',XS.lbl), cT(obra.eng||'')], [cT('Início / término previsto',XS.lbl), cT([fmtData(obra.ini), fmtData(obra.fim)].filter(Boolean).join(' — '))],
     [cT('Gerado em',XS.lbl), cT(`${gerado} — ${S.usuario.nome}`)], [],
-    [cT('Categoria',XS.head), cT('Valor (R$)',XS.head), cT('% do valor total',XS.head)]];
-  linhas.forEach(([n,ref,v,entra])=>{ const r = IM.length+1;
-    IM.push([cT(n,XS.lbl), cF(ref, v), entra ? {t:'n', f:`IF($B$16=0,0,B${r}/$B$16)`, v:t.total? v/t.total:0, z:'0.0%', s:XS.pct} : cT('não compõe o total',XS.info)]); });
-  IM.push([cT('Valor de reembolso',XS.lbl), cF("'Reembolso'!B9", t.reembolso), cFs("'Reembolso'!B10", interpretaReemb(t.reembolso), XS.txt)]);
-  IM.push([cT('VALOR TOTAL',XS.grandLbl), cF('B10+B11+B12+B13+B14', t.total, XS.grand), cT('',XS.grandLbl)]);
-  IM.push([], [cT('Valor total = Mão de Obra + Material + Custos dia a dia + Salário + Valor a pagar.',XS.info)],
-    [cT('Valor de reembolso = Custos dia a dia já pagos − Valor enviado. Lançamentos cancelados não entram no relatório.',XS.info)],
-    [], [cT('Pendente de pagamento',XS.lbl), cM(t.pend), cT(t.qPend ? `${t.qPend} item(ns) · próximo vencimento ${fmtData(t.proxVenc)}` : 'nenhum',XS.txt)]);
-  const inicio = montarAba(IM,[30,22,34],[{s:{r:0,c:0},e:{r:0,c:2}}]);
-  [['Início',inicio],['Valor enviado',env.ws],['Mão de Obra',mo.ws],['Material',mat.ws],['Custos dia a dia',dia.ws],['Salário',sal.ws],['A pagar',pag.ws],['Reembolso',reemb]]
+    [cT('Categoria',XS.head), cT('Valor (R$)',XS.head), cT('% do custo total',XS.head)]];
+  const rIniCT = IM.length + 8;   // linha do CUSTO TOTAL (ver ordem abaixo)
+  const pctCel = (r,v) => ({t:'n', f:`IF($B$${rIniCT}=0,0,B${r}/$B$${rIniCT})`, v:t.custoTotal? v/t.custoTotal:0, z:'0.0%', s:XS.pct});
+  const add = (rot, cel, terc, est) => { IM.push([cT(rot, est||XS.lbl), cel, terc]); return IM.length; };
+  add('Valor pago pelo cliente', cF(cli.ref, t.cliente), cT('receita — não compõe o custo',XS.info));
+  add('Valor enviado', cF(env.ref, t.enviado), cT('caixa do engenheiro — não compõe o custo',XS.info));
+  [['Mão de Obra', mo.ref, t.mo], ['Material', mat.ref, t.material], ['Custos dia a dia', dia.ref, t.dia], ['Salário', sal.ref, t.salario]]
+    .forEach(([n,ref,v])=>{ const r = IM.length + 1; add(n, cF(ref, v), pctCel(r, v)); });
+  { const r = IM.length + 1; add('Valor a pagar (sem categoria)', cF(`'Resultado'!B${rPag}`, t.apagar), pctCel(r, t.apagar)); }
+  const rCTi = add('CUSTO TOTAL DA OBRA', cF(`SUM(B${rIniCT-5}:B${rIniCT-1})`, t.custoTotal, XS.grand), cT('',XS.grandLbl), XS.grandLbl);
+  add('LUCRO ESPERADO', cF(`'Resultado'!B${rLuc}`, t.lucro, XS.totVal), cFs(`'Resultado'!B${rSit}`, SITUACAO[t.situacao].toUpperCase(), XS.lbl), XS.totLbl);
+  add('Resultado atual (sem os valores a pagar)', cF(`'Resultado'!B${rRes}`, t.resultadoAtual), cT('',XS.txt));
+  add('Valor de reembolso', cF("'Reembolso'!B9", t.reembolso), cFs("'Reembolso'!B10", interpretaReemb(t.reembolso), XS.txt));
+  IM.push([], [cT('Valores a pagar (previstos)',XS.lbl), cM(t.prevAPagar), cT(`já pago ${fmtBRL(t.pagoAPagar)} · pendente ${fmtBRL(t.pend)}${t.proxVenc?' · próximo vencimento '+fmtData(t.proxVenc):''}`,XS.txt)]);
+  if (a.alertas.length){ IM.push([], [cT('ALERTAS',XS.bloco)]); a.alertas.forEach(x=>IM.push([cT(x.texto,XS.txt)])); }
+  IM.push([], [cT('Custo total = Mão de Obra + Material + Custos dia a dia + Salário + Valor a pagar sem categoria.',XS.info)],
+    [cT('Lucro esperado = Valor pago pelo cliente − Custo total. Lançamentos cancelados não entram no relatório.',XS.info)]);
+  if (rCTi !== rIniCT) throw new Error('Início: linha do custo total fora do lugar');
+  const inicio = montarAba(IM,[40,22,40],[{s:{r:0,c:0},e:{r:0,c:2}}]);
+  [['Início',inicio],['Resultado',resultado],['Recebido do cliente',cli.ws],['Valor enviado',env.ws],['Mão de Obra',mo.ws],['Material',mat.ws],
+   ['Custos dia a dia',dia.ws],['Salário',sal.ws],['A pagar',pag.ws],['Reembolso',reemb]]
     .forEach(([n,ws])=>XLSX.utils.book_append_sheet(wb, ws, n));
   return wb;
 }
@@ -269,6 +401,7 @@ let sincronizando = false, ultimoErroSync = '', ultimoSyncOk = 0;
 
 class ErroRede extends Error {}
 async function api(acao, dados, semToken){
+  if (window.__DEMO__) return window.__DEMO__.api(acao, dados||{});
   if (!CONF.api) throw new Error('Servidor não configurado.');
   let r;
   try {
@@ -293,13 +426,14 @@ function aplicarLocal(op){
   switch (op.tipo){
     case 'obra.salvar': {
       const campos = {nome:d.nome, cidade:d.cidade, prop:d.prop, eng:d.eng, ini:d.ini};
+      ['contrato','area','fim','orcamento'].forEach(k=>{ if (k in d) campos[k] = d[k]; });
       const o = achar(S.obras, d.id);
       if (o) Object.assign(o, campos, {_pend:true}); else S.obras.push({id:d.id, ...campos, _pend:true});
       break; }
     case 'obra.arquivar': S.obras = S.obras.filter(o=>o.id!==d.id); break;
     case 'lanc.salvar': {
       const rec = {...d, vu:round2(d.vu), total:round2(d.qtd*round2(d.vu)), status:(d.categoria==='apagar'||d.forma===FORMA_PEND)?'Pendente':'Pago', _pend:true};
-      if (d.categoria!=='dia') rec.subcat=''; if (d.categoria!=='enviado') rec.tipo=''; if (rec.status!=='Pendente') rec.venc='';
+      if (d.categoria!=='dia') rec.subcat=''; if (!TIPOS[d.categoria]) rec.tipo=''; if (rec.status!=='Pendente') rec.venc='';
       const l = achar(S.lanc, d.id);
       if (l) Object.assign(l, rec);
       else S.lanc.push({...rec, comprovanteId:'', criadoPor:S.usuario.id, criadoEm:new Date(op.criadoEm).toISOString(), cancelado:false, motivoCancel:''});
@@ -311,7 +445,7 @@ function aplicarLocal(op){
         Object.assign(l, {forma:d.forma, status:'Pago', obs:l.obs?l.obs+' | '+nota:nota, _pend:true}); break; }
       if (l && l.categoria==='apagar'){
       const nota = `Previsto em "A pagar" (venc. ${fmtData(l.venc)})`;
-      Object.assign(l, {categoria:d.categoria, data:d.data, forma:d.forma, status:'Pago', subcat:d.categoria==='dia'?d.subcat:'', mesRef:mesRefDe(d.data), obs:l.obs?l.obs+' | '+nota:nota, venc:'', _pend:true}); } break; }
+      Object.assign(l, {categoria:d.categoria, data:d.data, forma:d.forma, status:'Pago', subcat:d.categoria==='dia'?d.subcat:'', mesRef:mesRefDe(d.data), obs:l.obs?l.obs+' | '+nota:nota, _pend:true}); } break; }
     case 'periodo.salvar': { const p = achar(S.periodos, d.id); if (p) Object.assign(p, d); else S.periodos.push({...d}); break; }
     case 'periodo.excluir': S.periodos = S.periodos.filter(p=>p.id!==d.id); break;
     case 'comprovante.enviar': { const l = achar(S.lanc, d.lancId); if (l){ l._compPend = op.opId; l._pend = true; } break; }
@@ -412,6 +546,7 @@ function fillSelect(el, arr, vazio){
   if ([...el.options].some(o=>o.value===v)) el.value = v;
 }
 const badge = k => `<span class="badge" style="--c:${CATS[k].cor}">${esc(CATS[k].nome)}</span>`;
+const chipSit = sit => `<span class="sit sit-${sit}">${SITUACAO[sit]}</span>`;
 
 /* ---------- permissões (espelham o servidor) ---------- */
 const perfil = () => S.usuario.perfil;
@@ -459,7 +594,7 @@ function rotear(soAtualizar){
   if (id){
     mostrarView('obra');
     if (!soAtualizar || obraAnterior!==id){
-      listaCat='todas'; ['r-ini','r-fim','l-ini','l-fim','l-txt'].forEach(x=>$(x).value=''); $('histBody').innerHTML='';
+      listaCat='todas'; ['r-ini','r-fim','l-ini','l-fim','l-txt','l-sit','l-etapa'].forEach(x=>$(x).value=''); $('histBody').innerHTML='';
       renderListas(); limparForm(false); abrirTab('lancar'); window.scrollTo(0,0); preencherDadosObra();
     }
     obraAnterior = id; viewAnterior = 'obra';
@@ -560,17 +695,17 @@ function renderHome(){
   $('obrasGrid').className = obras.length ? 'obras-grid' : '';
   $('obrasGrid').innerHTML = obras.length ? obras.map(o=>{
     const L = S.lanc.filter(l=>l.obraId===o.id && !l.cancelado), t = totais(L), ult = L.reduce((m,l)=>l.data>m?l.data:m,'');
-    const pend = L.filter(ehPendente);
-    const lblR = t.reembolso>0.004 ? 'A reembolsar' : t.reembolso<-0.004 ? 'Saldo em caixa' : 'Reembolso';
+    const pend = L.filter(ehPendente), an = analise(o, t), crit = an.alertas.filter(x=>x.nivel==='crit');
     const sub = [o.cidade, o.prop && 'Prop.: '+o.prop, o.ini && 'Início: '+fmtData(o.ini)].filter(Boolean).map(esc).join(' · ');
     return `<div class="obra-card">
       <div><h3>${esc(o.nome)} ${o._pend?'<span class="tag">⏳ não enviada</span>':''}</h3><div class="muted">${sub || 'Sem dados complementares'}</div></div>
       <div class="oc-nums">
-        <div><span>Valor total</span><b>${fmtBRL(t.total)}</b></div>
-        <div><span>${lblR}</span><b>${fmtBRL(Math.abs(t.reembolso))}</b></div>
-        <div><span>Lançamentos</span><b>${L.length}</b></div>
-        <div><span>Último lançamento</span><b>${ult ? fmtData(ult) : '—'}</b></div>
+        <div><span>Pago pelo cliente</span><b>${fmtBRL(t.cliente)}</b></div>
+        <div><span>Custo total</span><b>${fmtBRL(t.custoTotal)}</b></div>
+        <div class="oc-res oc-${t.situacao}"><span>Lucro esperado</span><b>${fmtBRL(t.lucro)}</b>${chipSit(t.situacao)}</div>
+        <div><span>Lançamentos · último</span><b>${L.length} · ${ult ? fmtData(ult).slice(0,5) : '—'}</b></div>
       </div>
+      ${crit.length ? `<div class="alerta alerta-crit">⚠ ${esc(crit[0].texto)}</div>` : ''}
       ${pend.length ? `<div class="aviso">⏰ ${pend.length} pagamento(s) pendente(s): ${fmtBRL(t.pend)}${t.proxVenc?` · próximo ${fmtData(t.proxVenc).slice(0,5)}`:''}</div>` : ''}
       <div class="row"><button class="btn pri" data-open="${o.id}" type="button">Abrir obra →</button>
         <a class="btn" href="#/obra/${o.id}" target="_blank" rel="noopener" title="Abrir em outra aba">↗ Nova aba</a></div></div>`;
@@ -618,19 +753,33 @@ function renderListas(){
   $('pg-cat').innerHTML = (ehProp() ? ['mo','material'] : ['mo','material','dia']).map(k=>`<option value="${k}">${CATS[k].nome}</option>`).join('');
   $('dl-etapa').innerHTML = S.cfg.etapas.map(u=>`<option value="${esc(u)}">`).join('');
   $('dl-forn').innerHTML = [...new Set(lancObra().map(l=>l.fornecedor).filter(Boolean))].sort().map(u=>`<option value="${esc(u)}">`).join('');
+  $('dl-desc').innerHTML = [...new Set(ativos().slice().sort(porData).reverse().map(l=>l.descricao))].slice(0,300).map(u=>`<option value="${esc(u)}">`).join('');
+  fillSelect($('l-etapa'), [...new Set([...S.cfg.etapas, ...lancObra().map(l=>l.etapa).filter(Boolean)])], 'Todas');
+  $('f-catPick').innerHTML = catsPermitidas().map(k=>`<button type="button" class="pick" data-pick="${k}" style="--c:${CATS[k].cor}" aria-pressed="false">${esc(CATS[k].nome)}</button>`).join('');
   updateFormVisibility();
 }
 
 /* ---------- formulário ---------- */
+const PLACEHOLDER = {cliente:'Ex.: Sinal do contrato, Medição 02, Parcela 3/6', enviado:'Ex.: Pix para custos da semana', mo:'Ex.: Quinzena pedreiros, Diária servente',
+  material:'Ex.: Cimento CP II 50 kg, Milheiro de tijolo', dia:'Ex.: Abastecimento, Almoço da equipe, Uber', salario:'Ex.: Salário de outubro', apagar:'Ex.: Aluguel de escavadeira, Medição do empreiteiro'};
 function updateFormVisibility(){
-  const cat = $('f-cat').value;
+  const cat = $('f-cat').value, recebimento = cat==='enviado' || cat==='cliente';
   document.querySelectorAll('#tab-lancar [data-show]').forEach(el=>{ el.hidden = !el.dataset.show.split(',').includes(cat); });
+  document.querySelectorAll('#f-catPick .pick').forEach(b=>{ const on = b.dataset.pick===cat; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
+  if (TIPOS[cat]){
+    const atual = $('f-tipo').value;
+    if ($('f-tipo').dataset.cat !== cat){ $('f-tipo').innerHTML = TIPOS[cat].map(x=>`<option>${esc(x)}</option>`).join(''); $('f-tipo').dataset.cat = cat; }
+    if (TIPOS[cat].includes(atual)) $('f-tipo').value = atual;
+    $('lbl-tipo').textContent = cat==='cliente' ? 'Tipo do recebimento' : 'Tipo do envio';
+  }
+  $('f-desc').placeholder = PLACEHOLDER[cat] || '';
   const optPend = [...$('f-forma').options].find(o=>o.value===FORMA_PEND);
-  if (optPend){ optPend.disabled = optPend.hidden = cat==='enviado'; if (cat==='enviado' && $('f-forma').value===FORMA_PEND) $('f-forma').value = S.cfg.formas[0]; }
+  if (optPend){ optPend.disabled = optPend.hidden = recebimento; if (recebimento && $('f-forma').value===FORMA_PEND) $('f-forma').value = S.cfg.formas[0]; }
   const aPrazo = $('f-forma').value===FORMA_PEND && cat!=='apagar';
   $('f-venc').closest('.fld').hidden = !(cat==='apagar' || aPrazo);
   document.querySelector('label[for=f-venc]').textContent = aPrazo ? 'Data prevista de pagamento' : 'Vencimento';
-  $('lbl-forn').textContent = cat==='enviado' ? 'Origem do recurso (quem enviou)' : cat==='mo' ? 'Beneficiário' : cat==='salario' ? 'Origem' : 'Fornecedor / Beneficiário';
+  $('lbl-forn').textContent = cat==='enviado' ? 'Origem do recurso (quem enviou)' : cat==='cliente' ? 'Pagador (cliente)' : cat==='mo' ? 'Beneficiário' : cat==='salario' ? 'Origem' : 'Fornecedor / Beneficiário';
+  $('lbl-doc').textContent = cat==='cliente' ? 'Nº NF / Recibo / Medição' : 'Nº NF / Recibo / Documento';
   $('f-un-outra').hidden = $('f-un').value !== '__outra';
 }
 const getUnidade = () => $('f-un').value==='__outra' ? $('f-un-outra').value.trim() : $('f-un').value;
@@ -649,12 +798,12 @@ function limparForm(manter){
   if (keep){ $('f-data').value=keep.data; $('f-forma').value=keep.forma; $('f-cat').value=keep.cat; $('f-subcat').value=keep.sub; setUnidade(keep.un); $('f-etapa').value=keep.etapa; $('f-mes').value=keep.mes; }
   $('f-mes').value = $('f-mes').value || mesRefDe($('f-data').value);
   editingId = null; $('formTitulo').textContent='Novo lançamento'; $('btnCancelar').hidden=true; $('btnSalvar').textContent='Salvar';
-  $('f-erro').textContent = ''; updateFormVisibility();
+  $('f-erro').textContent = ''; $('f-dica').hidden = true; updateFormVisibility();
 }
 function preencherForm(l){
   $('f-desc').value=l.descricao; $('f-data').value=l.data;
   $('f-cat').value = catsPermitidas().includes(l.categoria) ? l.categoria : catsPermitidas()[0]; $('f-forma').value=l.forma;
-  $('f-subcat').value=l.subcat||''; $('f-tipo').value=l.tipo||'Adiantamento para custos'; $('f-venc').value=l.venc||'';
+  updateFormVisibility(); $('f-subcat').value=l.subcat||''; if (TIPOS[l.categoria]) $('f-tipo').value = l.tipo || TIPOS[l.categoria][0]; $('f-venc').value=l.venc||'';
   $('f-qtd').value=String(l.qtd).replace('.',','); $('f-vu').value=String(l.vu).replace('.',',');
   $('f-forn').value=l.fornecedor||''; $('f-doc').value=l.doc||''; $('f-etapa').value=l.etapa||''; $('f-mes').value=l.mesRef||''; $('f-obs').value=l.obs||'';
   setUnidade(l.unidade); calcTotal(); limparComp();
@@ -675,7 +824,7 @@ function coletarForm(){
   $('f-erro').textContent = '';
   const data = $('f-data').value;
   return { obraId:obraAtualId(), descricao:$('f-desc').value.trim(), data, forma:$('f-forma').value, categoria:cat, unidade:un, qtd:q, vu:round2(v),
-    subcat: cat==='dia' ? $('f-subcat').value : '', tipo: cat==='enviado' ? $('f-tipo').value : '', venc: pendente ? $('f-venc').value : '',
+    subcat: cat==='dia' ? $('f-subcat').value : '', tipo: TIPOS[cat] ? $('f-tipo').value : '', venc: pendente ? $('f-venc').value : '',
     fornecedor:$('f-forn').value.trim(), doc:$('f-doc').value.trim(), etapa:$('f-etapa').value.trim(), mesRef:$('f-mes').value || mesRefDe(data), obs:$('f-obs').value.trim() };
 }
 function possivelDuplicado(o, id){
@@ -685,6 +834,7 @@ function possivelDuplicado(o, id){
 }
 async function salvar(continuar){
   const o = coletarForm(); if (!o) return;
+  if (o.categoria==='cliente' && BASE && (BASE.api||1) < 3){ $('f-erro').textContent = 'O servidor ainda não aceita "Valor pago pelo cliente". O administrador precisa concluir a Parte 1 da atualização (Google).'; return; }
   if (o.forma===FORMA_PEND && BASE && (BASE.api||1) < 2){ $('f-erro').textContent = 'O servidor ainda não aceita a forma "A pagar". O administrador precisa concluir a Parte 1 da atualização (Google).'; return; }
   const id = editingId || uid();
   const dup = possivelDuplicado(o, id);
@@ -696,6 +846,37 @@ async function salvar(continuar){
   limparForm(continuar); renderObra();
   if (continuar) $('f-desc').focus();
   sincronizar();
+}
+
+/* ---------- preenchimento pelo histórico e comparação de preço ---------- */
+function ultimoIgual(){
+  const d = $('f-desc').value.trim().toLowerCase(), cat = $('f-cat').value;
+  if (!d) return null;
+  return ativos().filter(l=>l.id!==editingId && l.categoria===cat && l.descricao.trim().toLowerCase()===d).sort(porData).pop() || null;
+}
+function sugerirPorDescricao(){
+  const ant = ultimoIgual();
+  if (ant && !editingId){
+    if (!$('f-vu').value) $('f-vu').value = String(ant.vu).replace('.',',');
+    setUnidade(ant.unidade);
+    if (!$('f-forn').value) $('f-forn').value = ant.fornecedor||'';
+    if (ant.categoria==='dia' && !$('f-subcat').value) $('f-subcat').value = ant.subcat||'';
+    if (!$('f-etapa').value) $('f-etapa').value = ant.etapa||'';
+    calcTotal();
+  }
+  dicaPreco();
+}
+function dicaPreco(){
+  const ant = ultimoIgual(), el = $('f-dica');
+  if (!ant || !['material','mo','dia','apagar'].includes(ant.categoria)){ el.hidden = true; return; }
+  const vu = parseNum($('f-vu').value);
+  let txt = `Última vez: ${fmtBRL(ant.vu)} por ${ant.unidade} em ${fmtData(ant.data)}${ant.fornecedor?` (${ant.fornecedor})`:''}.`, nivel = 'info';
+  if (vu > 0 && ant.vu > 0){
+    const v = (vu - ant.vu) / ant.vu;
+    if (Math.abs(v) >= 0.05){ txt += ` O valor informado está ${pct(Math.abs(v))} ${v>0?'acima':'abaixo'}.`; if (v >= 0.10) nivel = 'aviso'; }
+    else txt += ' Mesmo preço.';
+  }
+  el.className = `alerta alerta-${nivel}`; el.textContent = txt; el.hidden = false;
 }
 
 /* ---------- comprovante: reduz fotos para economizar dados ---------- */
@@ -748,20 +929,27 @@ function kpiHTML(lbl, v, cor, sub, cls){
   return `<div class="kpi ${cls||''}" style="--c:${cor}"><div class="l">${esc(lbl)}</div><div class="v">${fmtBRL(v)}</div>${sub?`<div class="s">${esc(sub)}</div>`:''}</div>`;
 }
 function kpisFull(t){
-  return CAT_ORDER.map(k=>{
-    let sub = ''; if (k==='enviado') sub = t.reembRec ? `inclui ${fmtBRL(t.reembRec)} de reembolso` : 'não compõe o total';
-    return kpiHTML(CATS[k].nome, t[k], CATS[k].cor, sub);
-  }).join('') + kpiHTML('Valor de reembolso', Math.abs(t.reembolso), '#607d8b', interpretaReemb(t.reembolso)) + kpiPend(t) +
-  kpiHTML('VALOR TOTAL', t.total, '#1f4e78', 'MO + Material + Dia a dia + Salário + A pagar', 'total');
+  const pc = k => t.custoTotal ? ` · ${pct(t[k]/t.custoTotal)} do custo` : '';
+  return CAT_CUSTO.map(k=>kpiHTML(CATS[k].nome, t[k], CATS[k].cor, `${k==='dia'&&t.diaPend?`${fmtBRL(t.diaPend)} ainda a pagar`:'custo lançado'}${pc(k)}`)).join('') +
+    `<div class="kpi" style="--c:${CATS.apagar.cor}"><div class="l">Valor a pagar (lançado para pagar depois)</div><div class="v">${fmtBRL(t.prevAPagar)}</div>
+      <div class="s">Já pago <b>${fmtBRL(t.pagoAPagar)}</b> · pendente <b>${fmtBRL(t.pend)}</b>${t.proxVenc?` · próximo ${fmtData(t.proxVenc)}`:''}</div>
+      ${t.prevAPagar>0?`<div class="barra-mini" title="Já pago ${pct(t.pagoAPagar/t.prevAPagar)}"><i style="width:${Math.min(100,t.pagoAPagar/t.prevAPagar*100)}%"></i></div>`:''}</div>` +
+    kpiHTML(CATS.enviado.nome, t.enviado, CATS.enviado.cor, t.reembRec ? `inclui ${fmtBRL(t.reembRec)} de reembolso · não é custo` : 'caixa do engenheiro · não é custo') +
+    kpiHTML('Reembolso', Math.abs(t.reembolso), '#607d8b', interpretaReemb(t.reembolso));
 }
-function kpiPend(t){
-  return kpiHTML('Pendente de pagamento', t.pend, '#8a6d00', t.qPend ? `${t.qPend} item(ns) · próximo venc. ${fmtData(t.proxVenc)}` : 'nada a pagar');
+function tileLucro(t, extra){
+  return `<div class="kpi lucro lucro-${t.situacao} ${extra||''}"><div class="l">Lucro esperado ${chipSit(t.situacao)}</div><div class="v">${fmtBRL(t.lucro)}</div>
+    <div class="s">${t.cliente>0 ? `Margem de ${pct(t.margem)} sobre o valor pago pelo cliente` : 'Lance o valor pago pelo cliente para calcular a margem'}</div></div>`;
 }
 function renderMini(){
-  const L = ativos(), t = totais(L), pend = lancObra().filter(l=>l._pend).length;
-  $('miniKpis').innerHTML = kpiHTML('Custos dia a dia', t.dia, CATS.dia.cor) +
-    kpiHTML('Valor de reembolso', Math.abs(t.reembolso), '#607d8b', interpretaReemb(t.reembolso)) + kpiPend(t).replace('style="', 'style="grid-column:1/-1;') +
-    kpiHTML('VALOR TOTAL', t.total, '#1f4e78', `${L.length} lançamento(s)${pend?` · ${pend} a enviar`:''}`, 'total');
+  const L = ativos(), t = totais(L), pend = lancObra().filter(l=>l._pend).length, an = analise(obraAtual(), t);
+  const al = an.alertas.find(x=>x.nivel==='crit') || an.alertas.find(x=>x.nivel==='aviso');
+  $('miniKpis').innerHTML = tileLucro(t, 'span2') +
+    kpiHTML('Pago pelo cliente', t.cliente, CATS.cliente.cor, `${t.qCliente} recebimento(s)`) +
+    kpiHTML('Custo total da obra', t.custoTotal, '#1f4e78', `${L.length} lançamento(s)${pend?` · ${pend} a enviar`:''}`) +
+    kpiHTML('Valor a pagar pendente', t.pend, CATS.apagar.cor, t.qPend ? `${t.qPend} item(ns) · próximo ${fmtData(t.proxVenc)}` : 'nada pendente') +
+    kpiHTML('Reembolso', Math.abs(t.reembolso), '#607d8b', interpretaReemb(t.reembolso)) +
+    (al ? `<button class="alerta alerta-${al.nivel} span2" type="button" data-irtab="resumo">${al.nivel==='crit'?'⚠':'!'} ${esc(al.texto)} <u>Ver resumo</u></button>` : '');
   const ult = lancObra().slice().sort((a,b)=>String(b.criadoEm||'').localeCompare(String(a.criadoEm||''))).slice(0,6);
   $('ultimos').innerHTML = ult.length ? ult.map(l=>`<tr class="${l.cancelado?'cancel':''}"><td title="${fmtData(l.data)}">${fmtData(l.data).slice(0,5)}</td><td>${badge(l.categoria)}</td><td>${esc(l.descricao)} ${l._pend?'<span class="tag">⏳</span>':''}</td><td class="n">${fmtBRL(l.total)}</td>
     <td>${podeEditar(l)?`<button class="btn sm" data-act="edit" data-id="${l.id}" type="button" title="Editar" aria-label="Editar">✎</button>`:''}</td></tr>`).join('')
@@ -769,34 +957,107 @@ function renderMini(){
 }
 
 /* ---------- resumo ---------- */
+function barra(frac, nivel){ const w = Math.max(0, Math.min(1, frac||0))*100; return `<div class="barra-h ${nivel?'b-'+nivel:''}"><i style="width:${w}%"></i></div>`; }
+const nivelPct = x => x==null ? '' : x > 1 ? 'crit' : x >= 0.9 ? 'aviso' : 'ok';
 function renderResumo(){
   if (!obraAtualId()) return;
-  const ini=$('r-ini').value, fim=$('r-fim').value;
-  const L = ativos().filter(l => (!ini || l.data>=ini) && (!fim || l.data<=fim)), t = totais(L);
+  const ini=$('r-ini').value, fim=$('r-fim').value, filtrado = !!(ini||fim);
+  const obra = obraAtual(), todos = ativos();
+  const L = todos.filter(l => (!ini || l.data>=ini) && (!fim || l.data<=fim)), t = totais(L);
+  const tObra = filtrado ? totais(todos) : t, an = analise(obra, tObra);
+  $('r-nota').textContent = filtrado ? 'Valores do período escolhido. Contrato, orçamento, prazo e alertas consideram a obra inteira.' : '';
+  // alertas
+  $('alertas').innerHTML = an.alertas.map(x=>`<div class="alerta alerta-${x.nivel}" role="${x.nivel==='crit'?'alert':'status'}">${{crit:'⚠',aviso:'!',info:'i',ok:'✓'}[x.nivel]} ${esc(x.texto)}</div>`).join('');
+  // painel de resultado
+  $('painelRes').innerHTML =
+    kpiHTML('Valor pago pelo cliente', t.cliente, CATS.cliente.cor, an.contrato>0 && !filtrado ? `${pct(an.pctRecebido)} do contrato de ${fmtBRL(an.contrato)}` : `${t.qCliente} recebimento(s)`) +
+    kpiHTML('Custo total da obra', t.custoTotal, '#1f4e78', `${fmtBRL(t.custoLancado)} lançados + ${fmtBRL(t.apagar)} a pagar sem categoria`) +
+    tileLucro(t) +
+    `<div class="kpi" style="--c:#455a64"><div class="l">Resultado atual</div><div class="v ${t.resultadoAtual<-0.004?'neg':''}">${fmtBRL(t.resultadoAtual)}</div>
+      <div class="s">Pago pelo cliente − custos lançados (sem os valores a pagar)</div></div>`;
+  // demonstrativo
+  const linhaD = (sinal, rot, v, cls, extra) => `<tr class="${cls||''}"><td class="sinal">${sinal}</td><td>${rot}</td><td class="n">${fmtBRL(v)}</td><td class="n muted">${extra??''}</td></tr>`;
+  const pc = v => t.custoTotal ? pct(v/t.custoTotal) : '';
+  $('dre').innerHTML =
+    linhaD('+', 'Valor pago pelo cliente', t.cliente, 'dre-receita') +
+    CAT_CUSTO.map(k=>linhaD('−', CATS[k].nome, t[k], '', pc(t[k]))).join('') +
+    linhaD('=', '<b>Resultado atual</b>', t.resultadoAtual, 'dre-sub') +
+    linhaD('−', 'Valor a pagar ainda sem categoria', t.apagar, '', pc(t.apagar)) +
+    `<tr class="dre-final dre-${t.situacao}"><td class="sinal">=</td><td><b>Lucro esperado</b> ${chipSit(t.situacao)}</td><td class="n"><b>${fmtBRL(t.lucro)}</b></td><td class="n">${t.cliente>0?pct(t.margem):''}</td></tr>` +
+    `<tr class="dre-nota"><td></td><td colspan="3">Custo total da obra: <b>${fmtBRL(t.custoTotal)}</b>. Margem = lucro esperado ÷ valor pago pelo cliente.</td></tr>`;
+  // contrato, orçamento e prazo
+  let h = '';
+  if (an.contrato > 0){
+    h += `<div class="bloco"><h3>Contrato</h3>
+      <div class="lin"><span>Valor do contrato</span><b>${fmtBRL(an.contrato)}</b></div>
+      <div class="lin"><span>Pago pelo cliente</span><b>${fmtBRL(tObra.cliente)} <small>(${pct(an.pctRecebido)})</small></b></div>${barra(an.pctRecebido,'ok')}
+      <div class="lin"><span>Falta receber</span><b>${fmtBRL(an.aReceber)}</b></div>
+      ${an.margemPrevista!=null?`<div class="lin"><span>Margem prevista (contrato − orçamento)</span><b class="${an.margemPrevista<0?'neg':''}">${fmtBRL(an.margemPrevista)} <small>(${pct(an.margemPrevista/an.contrato)})</small></b></div>`:''}
+      <div class="lin"><span title="Contrato − o maior valor entre o orçamento e o custo total atual">Margem projetada</span><b class="${an.margemProjetada<0?'neg':''}">${fmtBRL(an.margemProjetada)} <small>(${pct(an.margemProjetada/an.contrato)})</small></b></div></div>`;
+  }
+  if (an.temOrc){
+    h += `<div class="bloco"><h3>Orçamento × realizado</h3>` + an.porCat.map(c=>`
+      <div class="lin"><span>${CATS[c.k].nome}</span><b>${fmtBRL(c.real)} <small>de ${fmtBRL(c.prev)} · ${pct(c.pct)}</small></b></div>${barra(c.pct, nivelPct(c.pct))}`).join('') +
+      `<div class="lin tot"><span>Custo total × orçamento</span><b>${fmtBRL(tObra.custoTotal)} <small>de ${fmtBRL(an.orcTotal)} · ${pct(an.pctOrc)}</small></b></div>${barra(an.pctOrc, nivelPct(an.pctOrc))}
+      <div class="lin"><span>Saldo do orçamento</span><b class="${an.saldoOrc<0?'neg':''}">${fmtBRL(an.saldoOrc)}</b></div></div>`;
+  }
+  if (an.pctPrazo!=null){
+    h += `<div class="bloco"><h3>Prazo</h3>
+      <div class="lin"><span>${fmtData(obra.ini)} → ${fmtData(obra.fim)}</span><b>${an.diasRestantes>=0?`faltam ${an.diasRestantes} dia(s)`:`encerrado há ${-an.diasRestantes} dia(s)`}</b></div>
+      <div class="lin"><span>Prazo decorrido</span><b>${pct(an.pctPrazo)}</b></div>${barra(an.pctPrazo)}
+      ${an.temOrc?`<div class="lin"><span>Orçamento consumido</span><b>${pct(an.pctOrc)}</b></div>${barra(an.pctOrc, an.pctOrc-an.pctPrazo>0.15?'aviso':'ok')}`:''}</div>`;
+  }
+  if (an.area > 0){
+    h += `<div class="bloco"><h3>Por m² <small>(${fmtNum(an.area)} m²)</small></h3>
+      <div class="lin"><span>Custo total por m²</span><b>${fmtBRL(an.custoM2)}</b></div>
+      ${an.orcM2?`<div class="lin"><span>Orçamento por m²</span><b>${fmtBRL(an.orcM2)}</b></div>`:''}
+      ${an.contratoM2?`<div class="lin"><span>Contrato por m²</span><b>${fmtBRL(an.contratoM2)}</b></div>`:''}</div>`;
+  }
+  $('contratoBox').innerHTML = h || `<div class="vazio-mini"><p>Cadastre o <b>valor do contrato</b>, a <b>área</b>, o <b>término previsto</b> e o <b>orçamento</b> em Dados da obra para ver aqui: quanto falta receber, previsto × realizado, custo por m² e o andamento do prazo.</p>
+    ${!ehProp()?'<button class="btn" type="button" data-irtab="obra">Preencher em Dados da obra</button>':''}</div>`;
   $('kpis').innerHTML = kpisFull(t);
+  // vencimentos
   const hoje = hojeIso();
-  const pend = ativos().filter(ehPendente).sort((a,b)=>(a.venc||'').localeCompare(b.venc||''));
+  const pend = todos.filter(ehPendente).sort((a,b)=>(a.venc||'').localeCompare(b.venc||''));
   $('vencs').innerHTML = pend.length ? pend.map(l=>`<tr><td class="${l.venc<hoje?'venc-atraso':''}">${fmtData(l.venc)}${l.venc<hoje?' (vencido)':''}</td><td class="wrap">${badge(l.categoria)} ${esc(l.descricao)}</td>
     <td>${esc(l.fornecedor)}</td><td class="n">${fmtBRL(l.total)}</td><td>${podePagar(l)?`<button class="btn sm pri" data-act="pagar" data-id="${l.id}" type="button">✓ Pago</button>`:''}</td></tr>`).join('')
-    : `<tr><td colspan="5" class="muted">Nenhum pagamento previsto.</td></tr>`;
+    : `<tr><td colspan="5" class="muted">Nenhum pagamento pendente.</td></tr>`;
   if (typeof Chart === 'undefined' || !$('tab-resumo').classList.contains('on')) return;
-  const css = getComputedStyle(document.documentElement);
-  const cTxt = css.getPropertyValue('--txt').trim(), cBd = css.getPropertyValue('--bd').trim(), cCard = css.getPropertyValue('--card').trim();
+  const css = getComputedStyle(document.documentElement), cv = n => css.getPropertyValue(n).trim();
+  const cTxt = cv('--txt'), cBd = cv('--bd'), cCard = cv('--card');
   Chart.defaults.color = cTxt; Chart.defaults.borderColor = cBd;
-  const comp = CAT_TOTAL.filter(k=>t[k]>0);
-  $('compVazio').hidden = comp.length>0; $('chComp').parentElement.hidden = !comp.length;
-  charts.comp && charts.comp.destroy();
-  charts.comp = new Chart($('chComp'), {type:'doughnut',
-    data:{labels:comp.map(k=>CATS[k].nome), datasets:[{data:comp.map(k=>t[k]), backgroundColor:comp.map(k=>CATS[k].cor), borderColor:cCard, borderWidth:2}]},
-    options:{animation:false, maintainAspectRatio:false, plugins:{legend:{position:'bottom', labels:{color:cTxt}}, tooltip:{callbacks:{label:c=>`${c.label}: ${fmtBRL(c.raw)} (${(c.raw/t.total*100).toFixed(1)}%)`}}}}});
+  const eixoR$ = {ticks:{color:cTxt, callback:v=>'R$ '+(+v).toLocaleString('pt-BR',{notation:'compact'})}, grid:{color:cBd}};
+  const graf = (id, vazioId, tem, cfg) => { $(vazioId).hidden = tem; $(id).parentElement.hidden = !tem; charts[id] && charts[id].destroy(); charts[id] = tem ? new Chart($(id), cfg) : null; };
+  // composição do custo total
+  const comp = CAT_TOTAL.filter(k=>t[k]>0), nomeComp = k => k==='apagar' ? 'A pagar (sem categoria)' : CATS[k].nome;
+  graf('chComp', 'compVazio', comp.length>0, {type:'doughnut',
+    data:{labels:comp.map(nomeComp), datasets:[{data:comp.map(k=>t[k]), backgroundColor:comp.map(k=>CATS[k].cor), borderColor:cCard, borderWidth:2}]},
+    options:{animation:false, maintainAspectRatio:false, plugins:{legend:{position:'bottom', labels:{color:cTxt}}, tooltip:{callbacks:{label:c=>`${c.label}: ${fmtBRL(c.raw)} (${pct(c.raw/t.custoTotal)})`}}}}});
+  // evolução mensal acumulada: custo × valor pago pelo cliente
+  const meses = [...new Set(L.map(l=>(l.categoria==='apagar' ? (l.venc||l.data) : l.data).slice(0,7)))].sort();
+  let ac = 0, ar = 0;
+  const custoAc = meses.map(m=>{ ac += L.filter(l=>CAT_TOTAL.includes(l.categoria) && (l.categoria==='apagar'?(l.venc||l.data):l.data).slice(0,7)===m).reduce((s,l)=>s+l.total,0); return round2(ac); });
+  const recAc = meses.map(m=>{ ar += L.filter(l=>l.categoria==='cliente' && l.data.slice(0,7)===m).reduce((s,l)=>s+l.total,0); return round2(ar); });
+  graf('chMes', 'mesVazio', meses.length>0, {type:'line',
+    data:{labels:meses.map(fmtMes), datasets:[
+      {label:'Custo acumulado', data:custoAc, borderColor:cv('--acc'), backgroundColor:cv('--acc'), tension:.25, pointRadius:3},
+      {label:'Pago pelo cliente (acumulado)', data:recAc, borderColor:CATS.cliente.cor, backgroundColor:CATS.cliente.cor, tension:.25, pointRadius:3}]},
+    options:{animation:false, maintainAspectRatio:false, interaction:{mode:'index', intersect:false},
+      plugins:{legend:{position:'bottom', labels:{color:cTxt}}, tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${fmtBRL(c.raw)}`}}}, scales:{y:eixoR$, x:{ticks:{color:cTxt}, grid:{color:cBd}}}}});
+  // custo por etapa
+  const et = {}; L.filter(l=>CAT_TOTAL.includes(l.categoria)).forEach(l=>{ const e = l.etapa||'Sem etapa'; et[e] = (et[e]||0) + l.total; });
+  const ek = Object.keys(et).sort((a,b)=>et[b]-et[a]);
+  graf('chEtapa', 'etapaVazio', ek.length>0, {type:'bar',
+    data:{labels:ek, datasets:[{data:ek.map(k=>round2(et[k])), backgroundColor:'#1f4e78', borderRadius:4}]},
+    options:{animation:false, indexAxis:'y', maintainAspectRatio:false, plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>`${fmtBRL(c.raw)} (${pct(c.raw/t.custoTotal)})`}}},
+      scales:{x:eixoR$, y:{ticks:{color:cTxt}, grid:{color:cBd}}}}});
+  // custos dia a dia por subcategoria
   const subs = {}; L.filter(l=>l.categoria==='dia').forEach(l=>{ const s=l.subcat||'Outros'; subs[s]=(subs[s]||0)+l.total; });
   const sk = Object.keys(subs).sort((a,b)=>subs[b]-subs[a]);
-  $('subVazio').hidden = sk.length>0; $('chSub').parentElement.hidden = !sk.length;
-  charts.sub && charts.sub.destroy();
-  charts.sub = new Chart($('chSub'), {type:'bar',
+  graf('chSub', 'subVazio', sk.length>0, {type:'bar',
     data:{labels:sk, datasets:[{data:sk.map(k=>round2(subs[k])), backgroundColor:CATS.dia.cor, borderRadius:4}]},
     options:{animation:false, indexAxis:'y', maintainAspectRatio:false, plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>fmtBRL(c.raw)}}},
-      scales:{x:{ticks:{color:cTxt, callback:v=>'R$ '+(+v).toLocaleString('pt-BR')}, grid:{color:cBd}}, y:{ticks:{color:cTxt}, grid:{color:cBd}}}}});
+      scales:{x:eixoR$, y:{ticks:{color:cTxt}, grid:{color:cBd}}}}});
 }
 
 /* ---------- lista ---------- */
@@ -804,10 +1065,10 @@ const COLS_LISTA = [
   {k:'data',h:'Data',f:l=>fmtData(l.data)}, {k:'categoria',h:'Categoria',f:l=>badge(l.categoria)},
   {k:'descricao',h:'Descrição',f:l=>`${esc(l.descricao)}${l._pend?' <span class="tag" title="Ainda não enviado ao Drive">⏳</span>':''}${l.cancelado?` <span class="tag" title="${esc(l.motivoCancel)}">cancelado</span>`:''}`},
   {k:'fornecedor',h:'Fornecedor',f:l=>esc(l.fornecedor)},
-  {k:'subcat',h:'Subcat./Tipo',f:l=>esc(l.subcat||l.tipo||'')}, {k:'forma',h:'Forma',f:l=>esc(l.forma)},
+  {k:'subcat',h:'Subcat./Tipo',f:l=>esc(l.subcat||l.tipo||'')}, {k:'etapa',h:'Etapa',f:l=>esc(l.etapa||'')}, {k:'forma',h:'Forma',f:l=>esc(l.forma)},
   {k:'qtd',h:'Qtd.',n:1,f:l=>fmtNum(l.qtd)}, {k:'unidade',h:'Un.',f:l=>esc(l.unidade)},
   {k:'vu',h:'V. unit.',n:1,f:l=>fmtBRL(l.vu)}, {k:'total',h:'Total',n:1,f:l=>`<b>${fmtBRL(l.total)}</b>`},
-  {k:'venc',h:'Venc./Status',f:l=>ehPendente(l)?`<span class="${l.venc<hojeIso()?'venc-atraso':''}">${fmtData(l.venc)}</span> · <span class="tag">Pendente</span>`:esc(l.status)},
+  {k:'venc',h:'Venc./Status',f:l=>ehPendente(l)?`<span class="${l.venc<hojeIso()?'venc-atraso':''}">${fmtData(l.venc)}</span> · <span class="tag">Pendente</span>`:ehPrevistoAPagar(l)?`${esc(l.status)} <span class="tag ok" title="Lançado para pagar depois">a pagar · pago</span>`:esc(l.status)},
   {k:'criadoPor',h:'Lançado por',f:l=>esc(nomeUsuario(l.criadoPor))}
 ];
 function acoesLinha(l){
@@ -826,8 +1087,10 @@ function renderLista(){
   $('l-agr').value = PREFS.agrupamento || 'semana';
   const agr = PREFS.agrupamento || 'semana';
   const ini=$('l-ini').value, fim=$('l-fim').value, sub=$('l-sub').value, forma=$('l-forma').value, q=$('l-txt').value.trim().toLowerCase(), canc=$('l-canc').checked;
+  const sit=$('l-sit').value, etapa=$('l-etapa').value;
+  const okSit = l => !sit || (sit==='pendente' ? l.status==='Pendente' : sit==='pago' ? l.status!=='Pendente' : ehPrevistoAPagar(l));
   let L = lancObra().filter(l => (canc || !l.cancelado) && (listaCat==='todas'||l.categoria===listaCat) && (!ini||l.data>=ini) && (!fim||l.data<=fim) &&
-    (!sub||l.subcat===sub) && (!forma||l.forma===forma) && (!q || [l.descricao,l.fornecedor,l.doc,l.obs,l.etapa].join(' ').toLowerCase().includes(q)));
+    (!sub||l.subcat===sub) && (!forma||l.forma===forma) && okSit(l) && (!etapa||l.etapa===etapa) && (!q || [l.descricao,l.fornecedor,l.doc,l.obs,l.etapa].join(' ').toLowerCase().includes(q)));
   L.sort((a,b)=>{ const x=a[sortK], y=b[sortK]; const r = (typeof x==='number'&&typeof y==='number') ? x-y : String(x||'').localeCompare(String(y||''),'pt-BR'); return r*sortD || porData(a,b); });
   $('listaHead').innerHTML = COLS_LISTA.map(c=>`<th class="${c.n?'n':''}" data-sort="${c.k}">${c.h}${sortK===c.k?(sortD>0?' ▲':' ▼'):''}</th>`).join('') + '<th>Ações</th>';
   const linha = l => `<tr class="${l.cancelado?'cancel':''}">${COLS_LISTA.map(c=>`<td class="${c.n?'n':''}">${c.f(l)}</td>`).join('')}<td>${acoesLinha(l)}</td></tr>`;
@@ -839,11 +1102,11 @@ function renderLista(){
     for (const g of agrupar(L, agr, perObra())){
       const st = somaAt(g.itens);
       html += `<tr class="grp"><td colspan="${nc}">${esc(g.nome)} — ${fmtBRL(st)} <span class="muted">(${g.itens.length} item(ns))</span></td></tr>` + g.itens.map(linha).join('') +
-        `<tr class="sub"><td colspan="9" class="n">Subtotal do período</td><td class="n">${fmtBRL(st)}</td><td colspan="3"></td></tr>`;
+        `<tr class="sub"><td colspan="10" class="n">Subtotal do período</td><td class="n">${fmtBRL(st)}</td><td colspan="3"></td></tr>`;
     }
   } else html = L.map(linha).join('');
   $('listaBody').innerHTML = html;
-  $('listaFoot').innerHTML = `<tr><td colspan="9" class="n">${L.filter(l=>!l.cancelado).length} lançamento(s) — Total filtrado</td><td class="n">${fmtBRL(somaAt(L))}</td><td colspan="3"></td></tr>`;
+  $('listaFoot').innerHTML = `<tr><td colspan="10" class="n">${L.filter(l=>!l.cancelado).length} lançamento(s) — Total filtrado</td><td class="n">${fmtBRL(somaAt(L))}</td><td colspan="3"></td></tr>`;
 }
 
 /* ---------- histórico ---------- */
@@ -871,13 +1134,39 @@ async function carregarHistorico(){
 }
 
 /* ---------- dados da obra ---------- */
+const fmtValor = n => (+n) ? (+n).toLocaleString('pt-BR',{minimumFractionDigits:2, maximumFractionDigits:2}) : '';
+const CAMPOS_OBRA = ['o-nome','o-cidade','o-prop','o-eng','o-ini','o-fim','o-contrato','o-area','o-orc-mo','o-orc-material','o-orc-dia','o-orc-salario'];
 function preencherDadosObra(){
   const o = obraAtual(); if (!o) return;
   $('o-nome').value=o.nome; $('o-cidade').value=o.cidade||''; $('o-prop').value=o.prop||''; $('o-eng').value=o.eng||''; $('o-ini').value=o.ini||'';
+  $('o-fim').value=o.fim||''; $('o-contrato').value=fmtValor(o.contrato); $('o-area').value=(+o.area)?String(o.area).replace('.',','):'';
+  ORC_CATS.forEach(k=>$('o-orc-'+k).value = fmtValor((o.orcamento||{})[k])); somarOrcamento();
+}
+function somarOrcamento(){
+  const tot = ORC_CATS.reduce((s,k)=>s+(parseNum($('o-orc-'+k).value)||0),0);
+  $('o-orc-total').value = tot ? fmtBRL(tot) : '';
+}
+function lerDadosObra(){
+  const num = id => { const v = $(id).value.trim(); if (!v) return 0; const n = parseNum(v); return isFinite(n) && n >= 0 ? round2(n) : NaN; };
+  const d = {nome:$('o-nome').value.trim(), cidade:$('o-cidade').value.trim(), prop:$('o-prop').value.trim(), eng:$('o-eng').value.trim(), ini:$('o-ini').value,
+    fim:$('o-fim').value, contrato:num('o-contrato'), area:num('o-area'), orcamento:{}};
+  ORC_CATS.forEach(k=>d.orcamento[k] = num('o-orc-'+k));
+  if (!d.nome) return 'Informe o nome da obra.';
+  if ([d.contrato, d.area, ...Object.values(d.orcamento)].some(isNaN)) return 'Confira os valores: use só números (ex.: 380.000,00).';
+  if (d.ini && d.fim && d.fim < d.ini) return 'O término previsto deve ser depois do início.';
+  return d;
+}
+async function salvarObra(){
+  const d = lerDadosObra(); if (typeof d === 'string'){ $('o-erro').textContent = d; return; }
+  $('o-erro').textContent = '';
+  if (BASE && (BASE.api||1) < 3 && (d.contrato || d.area || d.fim || ORC_CATS.some(k=>d.orcamento[k]))){ $('o-erro').textContent = 'O servidor ainda não guarda contrato e orçamento. O administrador precisa concluir a Parte 1 da atualização (Google).'; return; }
+  const o = obraAtual();
+  await enfileirar('obra.salvar', {id:o.id, ...d});
+  renderObra(); document.title = `${d.nome} — Controle de Obras`; toast('Dados da obra salvos'); sincronizar();
 }
 function renderDadosObra(){
   const pode = !ehProp();
-  ['o-nome','o-cidade','o-prop','o-eng','o-ini'].forEach(i=>$(i).disabled=!pode); $('o-salvar').hidden = !pode;
+  CAMPOS_OBRA.forEach(i=>$(i).disabled=!pode); document.querySelectorAll('.o-salvar').forEach(b=>b.hidden = !pode);
   $('perForm').hidden = !pode; $('cardArquivar').hidden = !ehAdmin();
   const P = perObra();
   $('perList').innerHTML = P.length ? P.map(p=>`<tr><td><b>${esc(p.nome)}</b></td><td>${fmtData(p.ini)} – ${fmtData(p.fim)}</td>
@@ -937,7 +1226,8 @@ async function gerarExcel(){
   const wb = construirWorkbook(o, ativos(), PREFS.agrupamento||'semana', perObra());
   const d = hojeIso().split('-').reverse().join('-');
   const nome = `Controle de Gastos - ${o.nome.replace(/[\\/:*?"<>|]/g,'-')} - ${d}.xlsx`;
-  XLSX.writeFile(wb, nome);
+  try { XLSX.writeFile(wb, nome); } catch(e){ /* download bloqueado pelo navegador */ }
+  if (window.__DEMO__){ toast('Na demonstração o download pode ser bloqueado. Um Excel de exemplo foi enviado na conversa.'); return; }
   await enfileirar('relatorio.salvar', {obraId:o.id, nome, base64:XLSX.write(wb, {type:'base64', bookType:'xlsx'})});
   toast('Relatório gerado. Uma cópia será guardada na pasta da obra no Drive.');
   sincronizar();
@@ -1017,10 +1307,14 @@ async function salvarListas(){
 async function criarObraExemplo(){
   if (!confirm('Criar uma obra de exemplo com lançamentos fictícios? Ela será gravada no Drive e poderá ser arquivada depois.')) return;
   const obraId = uid();
-  await enfileirar('obra.salvar', {id:obraId, nome:'Obra Buriticupu (exemplo)', cidade:'Buriticupu/MA', prop:'Proprietário', eng:S.usuario.nome, ini:'2026-08-29'});
+  const comFin = BASE && (BASE.api||1) >= 3;
+  await enfileirar('obra.salvar', {id:obraId, nome:'Obra Buriticupu (exemplo)', cidade:'Buriticupu/MA', prop:'Proprietário', eng:S.usuario.nome, ini:'2026-08-29',
+    ...(comFin ? {fim:'2027-03-30', contrato:380000, area:600, orcamento:{mo:120000, material:150000, dia:25000, salario:24000}} : {})});
   const E = (categoria,data,descricao,unidade,qtd,vu,x={}) => enfileirar('lanc.salvar', {id:uid(), obraId, categoria, data, descricao, unidade, qtd, vu, forma:'PIX',
     fornecedor:'', doc:'', etapa:'', subcat:'', tipo:'', venc:'', mesRef:mesRefDe(data), obs:'', ...x});
   const ad = {tipo:'Adiantamento para custos', fornecedor:'Proprietário'};
+  if (comFin){ await E('cliente','2026-08-25','Sinal do contrato','vb',1,76000,{tipo:'Sinal / entrada', fornecedor:'Contratante'});
+    await E('cliente','2026-09-30','Medição 01','vb',1,95000,{tipo:'Medição', fornecedor:'Contratante', doc:'MED-01'}); }
   await E('enviado','2026-09-04','Pix recebido para custos','vb',1,1000,ad); await E('enviado','2026-09-07','Pix recebido para custos','vb',1,2000,ad);
   await E('enviado','2026-09-23','Pix recebido — reembolso','vb',1,2778,{tipo:'Reembolso recebido', fornecedor:'Proprietário'});
   await E('mo','2026-09-07','Início do serviço','vb',1,3500,{fornecedor:'Hamilton', etapa:'Serviços preliminares'});
@@ -1042,7 +1336,7 @@ async function criarObraExemplo(){
    ===================================================================== */
 let pedidoAtualizar = false;
 function registrarSW(){
-  if (!('serviceWorker' in navigator) || !/^https?:$/.test(location.protocol)) return;
+  if (window.__DEMO__ || !('serviceWorker' in navigator) || !/^https?:$/.test(location.protocol)) return;
   navigator.serviceWorker.register('sw.js').then(reg=>{
     const avisar = w => { if (!w) return; w.addEventListener('statechange', ()=>{ if (w.state==='installed' && navigator.serviceWorker.controller){
       $('barraAtualizacao').hidden=false;
@@ -1099,7 +1393,7 @@ function ligarEventos(){
   $('btnSalvarOutro').onclick = ()=>salvar(true);
   $('btnCancelar').onclick = ()=>limparForm(false);
   $('btnLimparForm').onclick = ()=>limparForm(false);
-  ['l-ini','l-fim','l-sub','l-forma','l-canc'].forEach(id=>$(id).onchange=renderLista);
+  ['l-ini','l-fim','l-sub','l-forma','l-canc','l-sit','l-etapa'].forEach(id=>$(id).onchange=renderLista);
   $('l-txt').oninput = renderLista;
   $('l-agr').onchange = e=>{ PREFS.agrupamento=e.target.value; salvarPrefs(); renderLista(); };
   $('r-ini').onchange = $('r-fim').onchange = renderResumo;
@@ -1110,9 +1404,10 @@ function ligarEventos(){
   $('cn-ok').onclick = confirmarCancelamento; $('cn-voltar').onclick = ()=>$('dlgCancelar').close();
   $('cp-fechar').onclick = ()=>$('dlgComp').close();
   $('sp-ok').onclick = ()=>{ $('sp-senha').textContent=''; $('dlgSenha').close(); };
-  $('o-salvar').onclick = async ()=>{ const o=obraAtual(); if(!$('o-nome').value.trim()) return alert('Informe o nome da obra.');
-    await enfileirar('obra.salvar', {id:o.id, nome:$('o-nome').value.trim(), cidade:$('o-cidade').value.trim(), prop:$('o-prop').value.trim(), eng:$('o-eng').value.trim(), ini:$('o-ini').value});
-    renderObra(); toast('Dados da obra salvos'); sincronizar(); };
+  document.querySelectorAll('.o-salvar').forEach(b=>b.onclick = salvarObra);
+  ORC_CATS.forEach(k=>$('o-orc-'+k).oninput = somarOrcamento);
+  $('f-desc').addEventListener('change', sugerirPorDescricao);
+  $('f-vu').addEventListener('input', dicaPreco);
   $('o-arquivar').onclick = async ()=>{ const o=obraAtual(); const motivo = prompt(`Arquivar "${o.nome}"? Informe o motivo (ex.: obra concluída):`); if (!motivo) return;
     await enfileirar('obra.arquivar', {id:o.id, motivo}); toast('Obra arquivada'); irInicio(); sincronizar(); };
   $('p-add').onclick = async ()=>{
@@ -1129,6 +1424,8 @@ function ligarEventos(){
   document.body.addEventListener('click', async e=>{
     if (e.target.id==='btnLimparRej'){ REJ=[]; await kv.set('rejeitados', REJ); renderHome(); return; }
     const op = e.target.closest('[data-open]'); if (op) return irObra(op.dataset.open);
+    const it = e.target.closest('[data-irtab]'); if (it){ abrirTab(it.dataset.irtab); window.scrollTo({top:0,behavior:'smooth'}); return; }
+    const pk = e.target.closest('[data-pick]'); if (pk){ $('f-cat').value = pk.dataset.pick; updateFormVisibility(); dicaPreco(); return; }
     const b = e.target.closest('[data-act]'); if (b) return acao(b.dataset.act, b.dataset.id);
     const c = e.target.closest('[data-cat]'); if (c){ listaCat=c.dataset.cat; renderLista(); return; }
     const s = e.target.closest('th[data-sort]'); if (s){ sortD = sortK===s.dataset.sort ? -sortD : 1; sortK=s.dataset.sort; renderLista(); }
@@ -1138,7 +1435,11 @@ function ligarEventos(){
 async function init(){
   $('versaoApp').textContent = 'Controle de Obras v' + VERSAO_APP;
   lerPrefs(); aplicarTema(); ligarEventos(); registrarSW();
-  try { await kv.abrir(); } catch(e){ document.body.innerHTML = '<p style="padding:20px">Este navegador bloqueou o armazenamento local (modo anônimo?). Abra em uma janela normal.</p>'; return; }
+  try { await kv.abrir(); } catch(e){
+    if (!window.__DEMO__){ document.body.innerHTML = '<p style="padding:20px">Este navegador bloqueou o armazenamento local (modo anônimo?). Abra em uma janela normal.</p>'; return; }
+    const m = new Map(); Object.assign(kv, {get:async k=>m.get(k), set:async (k,v)=>{ m.set(k,v); }, del:async k=>{ m.delete(k); }});
+  }
+  if (window.__DEMO__){ await window.__DEMO__.iniciar(); return; }
   CONF = (await kv.get('conf')) || {};
   const qp = new URLSearchParams(location.search).get('api');
   if (qp && /^https:\/\/script\.google(usercontent)?\.com\//.test(qp) || qp && /^http:\/\/localhost(:\d+)?\//.test(qp)){ CONF.api = qp; await kv.set('conf', CONF); }
